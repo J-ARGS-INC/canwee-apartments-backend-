@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: canwee-apartments-api
+    runtime: node
+    plan: free
+    rootDir: Downloads/canwee apartment/server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 4000
+      - key: CORS_ORIGIN
+        value: https://canweeapartments.com,https://www.canweeapartments.com
+      - key: PGHOST
+        sync: false
+      - key: PGPORT
+        value: 5432
+      - key: PGUSER
+        sync: false
+      - key: PGPASSWORD
+        sync: false
+      - key: PGDATABASE
+        value: postgres
+      - key: ADMIN_API_KEY
+        sync: false

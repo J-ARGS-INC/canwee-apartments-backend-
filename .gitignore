@@ -1,0 +1,16 @@
+# Dependencies
+node_modules
+
+# Environment files (real DB credentials + admin key live here)
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
