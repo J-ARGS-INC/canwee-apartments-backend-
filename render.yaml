@@ -3,7 +3,6 @@ services:
     name: canwee-apartments-api
     runtime: node
     plan: free
-    rootDir: Downloads/canwee apartment/server
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
