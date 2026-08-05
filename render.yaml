@@ -23,3 +23,17 @@ services:
         value: postgres
       - key: ADMIN_API_KEY
         sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_FROM_EMAIL
+        value: support@canweeapartments.com
+      - key: BREVO_FROM_NAME
+        value: Canwee Apartments
+      - key: NOTIFY_EMAILS
+        value: support@canweeapartments.com,jargsltd@gmail.com
+      - key: FRONTEND_URL
+        value: https://canweeapartments.com
+      - key: ADMIN_DASHBOARD_URL
+        value: https://canweeapartments.com/2889bc29ed60/admin

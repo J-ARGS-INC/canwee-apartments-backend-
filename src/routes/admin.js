@@ -1,6 +1,43 @@
 import { Router } from 'express'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
 import { pool } from '../db.js'
 import { requireAdmin } from '../middleware/adminAuth.js'
+import { adminLimiter, loginLimiter } from '../middleware/rateLimiters.js'
+import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
+import { diffFields, logAudit } from '../lib/auditLog.js'
+
+// Precomputed so a login attempt for a username that doesn't exist still
+// spends real time in bcrypt.compare — otherwise "unknown username" would
+// respond measurably faster than "wrong password," letting an attacker
+// enumerate valid usernames by timing alone.
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 12)
+
+const MONEY_FIELDS = ['ratePerNight', 'discount', 'totalAmount', 'amountPaid']
+// Creating a booking/expense needs no justification — an edit changing
+// values someone already recorded does, so the person making the change is
+// forced to leave a paper trail explaining why (a correction, a guest
+// dispute, a data-entry fix, etc), not just what changed.
+function requireReason(body, errors) {
+  if (typeof body.reason !== 'string' || !body.reason.trim()) {
+    errors.reason = 'Enter a reason for the edit.'
+  }
+}
+
+// Hard backstop against obviously-fraudulent values (negative amounts,
+// non-numeric input) before they ever reach the DB — the DB-level CHECK
+// constraints in schema.sql back this up in case this validation is ever
+// bypassed or has a bug, but returning a clean 400 here is much better UX
+// than surfacing a raw constraint-violation error.
+function validateMoneyFields(body, errors) {
+  for (const field of MONEY_FIELDS) {
+    if (body[field] == null || body[field] === '') continue
+    const num = Number(body[field])
+    if (!Number.isFinite(num) || num < 0) {
+      errors[field] = `${field} must be a non-negative number.`
+    }
+  }
+}
 
 const router = Router()
 
@@ -11,10 +48,72 @@ const TRANSITIONS = {
   cancel: { from: ['pending', 'confirmed'], to: 'cancelled' },
 }
 
+const BOOKING_SELECT = `
+  select b.id, b.booking_code, b.booking_date, b.listing_id, b.full_name, b.email, b.phone,
+         b.check_in, b.check_out, b.guests, b.notes, b.status,
+         b.rate_per_night, b.discount, b.total_amount, b.amount_paid, b.balance,
+         b.payment_status, b.payment_method, b.payment_date, b.source_channel, b.received_by,
+         b.actual_check_in_at, b.actual_check_out_at, b.created_at, b.updated_at,
+         l.title as listing_title, l.city as listing_city, l.unit_code, l.bedrooms
+  from bookings b
+  join listings l on l.id = b.listing_id
+`
+
+// Whitelisted camelCase -> column name so PATCH bodies can never target an
+// arbitrary column, only these explicitly-supported financial/booking-
+// management fields.
+const FINANCE_FIELDS = {
+  bookingDate: 'booking_date',
+  ratePerNight: 'rate_per_night',
+  discount: 'discount',
+  totalAmount: 'total_amount',
+  amountPaid: 'amount_paid',
+  paymentStatus: 'payment_status',
+  paymentMethod: 'payment_method',
+  paymentDate: 'payment_date',
+  sourceChannel: 'source_channel',
+  receivedBy: 'received_by',
+  notes: 'notes',
+  fullName: 'full_name',
+  phone: 'phone',
+  email: 'email',
+}
+
+// Must be registered before the requireAdmin gate below — there's no
+// token to present yet at the point of logging in.
+router.post('/login', loginLimiter, async (req, res, next) => {
+  try {
+    const { username, password } = req.body ?? {}
+    if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+      return res.status(400).json({ error: 'Enter your username and password.' })
+    }
+
+    const { rows } = await pool.query(
+      'select id, display_name, role, is_active, password_hash from admin_users where id = $1',
+      [username],
+    )
+    const record = rows[0]
+    const valid = await bcrypt.compare(password, record ? record.password_hash : DUMMY_HASH)
+
+    // A deactivated account fails login even with the correct password —
+    // removal must be immediate and total, not just "can't do anything once
+    // signed in."
+    if (!record || !valid || !record.is_active) {
+      return res.status(401).json({ error: 'Invalid username or password.' })
+    }
+
+    const token = jwt.sign({ sub: record.id }, process.env.JWT_SECRET, { expiresIn: '12h', algorithm: 'HS256' })
+    res.json({ token, adminId: record.id, displayName: record.display_name, role: record.role })
+  } catch (err) {
+    next(err)
+  }
+})
+
+router.use(adminLimiter)
 router.use(requireAdmin)
 
 router.get('/verify', (req, res) => {
-  res.json({ ok: true })
+  res.json({ ok: true, adminId: req.adminId, displayName: req.adminDisplayName, role: req.adminRole })
 })
 
 router.get('/bookings', async (req, res, next) => {
@@ -22,23 +121,171 @@ router.get('/bookings', async (req, res, next) => {
     const { status } = req.query
     const params = []
     let where = ''
-    if (status) {
+    if (status && typeof status === 'string') {
       params.push(status)
       where = 'where b.status = $1'
     }
 
+    const { rows } = await pool.query(`${BOOKING_SELECT} ${where} order by b.check_in desc`, params)
+    res.json(rows)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Manual entry for offline bookings (WhatsApp, Instagram, phone, walk-in,
+// or backfilling historical records from the spreadsheet). Unlike the
+// public POST /api/bookings, this skips guest-facing validation/emails —
+// staff enter exactly what they know, including a status other than
+// "pending" (e.g. straight to "checked_out" for a past stay).
+router.post('/bookings', async (req, res, next) => {
+  try {
+    const {
+      listingId, fullName, email, phone, checkIn, checkOut, guests, notes,
+      status, bookingDate, ratePerNight, discount, totalAmount, amountPaid,
+      paymentStatus, paymentMethod, paymentDate, sourceChannel, receivedBy,
+    } = req.body ?? {}
+
+    const errors = {}
+    requireString(listingId, 'listingId', errors)
+    requireString(fullName, 'fullName', errors)
+    requireString(phone, 'phone', errors)
+    maxLength(fullName, 'fullName', 200, errors)
+    maxLength(phone, 'phone', 30, errors)
+    maxLength(email, 'email', 200, errors)
+    maxLength(notes, 'notes', 2000, errors)
+    // Past check-in dates are allowed here (unlike the public form) —
+    // backfilling real historical bookings from the operator's spreadsheet
+    // is a legitimate, expected use of this endpoint.
+    if (!isValidDate(checkIn)) errors.checkIn = 'Enter a valid check-in date.'
+    if (!isValidDate(checkOut)) errors.checkOut = 'Enter a valid check-out date.'
+    if (!errors.checkIn && !errors.checkOut && checkOut <= checkIn) {
+      errors.checkOut = 'Check-out must be after check-in.'
+    }
+    if (email && !isValidEmail(email)) errors.email = 'Enter a valid email address.'
+    validateMoneyFields(req.body ?? {}, errors)
+    if (Object.keys(errors).length > 0) {
+      return res.status(400).json({ error: 'Validation failed', fields: errors })
+    }
+
+    const { rows: listingRows } = await pool.query('select price_per_night from listings where id = $1', [listingId])
+    if (listingRows.length === 0) {
+      return res.status(404).json({ error: 'Listing not found' })
+    }
+
+    const guestCount = Number(guests) || 1
+    const rate = ratePerNight != null ? Number(ratePerNight) : listingRows[0].price_per_night
+    const nights = Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)))
+    const discountAmount = discount != null ? Number(discount) : 0
+    const total = totalAmount != null ? Number(totalAmount) : nights * rate - discountAmount
+
     const { rows } = await pool.query(
-      `select b.id, b.listing_id, b.full_name, b.email, b.phone, b.check_in, b.check_out,
-              b.guests, b.notes, b.status, b.actual_check_in_at, b.actual_check_out_at,
-              b.created_at, b.updated_at, l.title as listing_title, l.city as listing_city
-       from bookings b
-       join listings l on l.id = b.listing_id
-       ${where}
-       order by b.check_in desc`,
+      `insert into bookings (
+        listing_id, full_name, email, phone, check_in, check_out, guests, notes, status,
+        booking_date, rate_per_night, discount, total_amount, amount_paid,
+        payment_status, payment_method, payment_date, source_channel, received_by
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+      returning id, booking_code, status`,
+      [
+        listingId, fullName, email || null, phone, checkIn, checkOut, guestCount, notes || null,
+        status || 'pending', bookingDate || new Date().toISOString().slice(0, 10), rate,
+        discountAmount, total, amountPaid != null ? Number(amountPaid) : 0,
+        paymentStatus || 'unpaid', paymentMethod || null, paymentDate || null,
+        sourceChannel || null, receivedBy || null,
+      ],
+    )
+
+    logAudit({
+      entityType: 'booking',
+      entityId: rows[0].id,
+      action: 'create',
+      changes: { listingId, fullName, checkIn, checkOut, rate, discount: discountAmount, total, status: status || 'pending' },
+      actor: req.adminId,
+    })
+
+    res.status(201).json(rows[0])
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Booking-management fields (payments, dates, contact details) — separate
+// from the /bookings/:id status-transition endpoint below, since these are
+// edits, not a workflow transition with from/to rules.
+router.patch('/bookings/:id/details', async (req, res, next) => {
+  try {
+    const { id } = req.params
+    const body = req.body ?? {}
+
+    const errors = {}
+    requireReason(body, errors)
+    validateMoneyFields(body, errors)
+    if ('email' in body && body.email && !isValidEmail(body.email)) {
+      errors.email = 'Enter a valid email address.'
+    }
+    if ('fullName' in body && (typeof body.fullName !== 'string' || !body.fullName.trim())) {
+      errors.fullName = 'Guest name cannot be blank.'
+    }
+    if ('phone' in body && (typeof body.phone !== 'string' || !body.phone.trim())) {
+      errors.phone = 'Phone cannot be blank.'
+    }
+    maxLength(body.fullName, 'fullName', 200, errors)
+    maxLength(body.phone, 'phone', 30, errors)
+    maxLength(body.email, 'email', 200, errors)
+    maxLength(body.notes, 'notes', 2000, errors)
+    maxLength(body.reason, 'reason', 1000, errors)
+    if (Object.keys(errors).length > 0) {
+      return res.status(400).json({ error: 'Validation failed', fields: errors })
+    }
+
+    const setClauses = []
+    const params = []
+    for (const [key, column] of Object.entries(FINANCE_FIELDS)) {
+      if (key in body) {
+        params.push(body[key])
+        setClauses.push(`${column} = $${params.length}`)
+      }
+    }
+
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No recognized fields to update.' })
+    }
+
+    const { rows: before } = await pool.query(`${BOOKING_SELECT} where b.id = $1`, [id])
+    if (before.length === 0) {
+      return res.status(404).json({ error: 'Booking not found' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `update bookings set ${setClauses.join(', ')}, updated_at = now() where id = $${params.length} returning id`,
       params,
     )
 
-    res.json(rows)
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Booking not found' })
+    }
+
+    const { rows: full } = await pool.query(`${BOOKING_SELECT} where b.id = $1`, [id])
+
+    const changedKeys = Object.keys(body).filter((key) => key in FINANCE_FIELDS)
+    const beforeCamel = {}
+    const afterCamel = {}
+    for (const key of changedKeys) {
+      const column = FINANCE_FIELDS[key]
+      beforeCamel[key] = before[0][column]
+      afterCamel[key] = full[0][column]
+    }
+    logAudit({
+      entityType: 'booking',
+      entityId: id,
+      action: 'update',
+      changes: diffFields(beforeCamel, afterCamel, changedKeys),
+      actor: req.adminId,
+      reason: body.reason,
+    })
+
+    res.json(full[0])
   } catch (err) {
     next(err)
   }
@@ -80,6 +327,14 @@ router.patch('/bookings/:id', async (req, res, next) => {
        returning id, status, actual_check_in_at, actual_check_out_at, updated_at`,
       [transition.to, id],
     )
+
+    logAudit({
+      entityType: 'booking',
+      entityId: id,
+      action: 'status_change',
+      changes: { status: { old: currentStatus, new: transition.to } },
+      actor: req.adminId,
+    })
 
     res.json(updated[0])
   } catch (err) {

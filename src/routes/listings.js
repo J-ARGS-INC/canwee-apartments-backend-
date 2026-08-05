@@ -10,6 +10,7 @@ function mapListing(row, baseUrl, imagesByListing) {
     city: row.city,
     state: row.state,
     neighborhood: row.neighborhood,
+    unitCode: row.unit_code,
     address: row.address,
     pricePerNight: row.price_per_night,
     bedrooms: row.bedrooms,
@@ -51,6 +52,14 @@ async function fetchImagesByListing(listingIds) {
   return imagesByListing
 }
 
+// Express parses repeated query keys (?city=a&city=b) as arrays, which
+// would otherwise get bound straight into a parameterized query and throw
+// a Postgres type error. Coercing anything non-string to undefined keeps
+// malformed query strings a 200/400, never a 500.
+function asString(value) {
+  return typeof value === 'string' ? value : undefined
+}
+
 const SORTS = {
   'price-asc': 'price_per_night asc',
   'price-desc': 'price_per_night desc',
@@ -60,7 +69,12 @@ const SORTS = {
 
 router.get('/', async (req, res, next) => {
   try {
-    const { city, guests, bedrooms, price, sort, featured } = req.query
+    const city = asString(req.query.city)
+    const guests = asString(req.query.guests)
+    const bedrooms = asString(req.query.bedrooms)
+    const price = asString(req.query.price)
+    const sort = asString(req.query.sort)
+    const featured = asString(req.query.featured)
 
     const conditions = []
     const params = []
@@ -69,14 +83,14 @@ router.get('/', async (req, res, next) => {
       params.push(city)
       conditions.push(`city = $${params.length}`)
     }
-    if (guests) {
+    if (guests && Number.isFinite(Number(guests))) {
       params.push(Number(guests))
       conditions.push(`max_guests >= $${params.length}`)
     }
     if (bedrooms && bedrooms !== 'any') {
       if (bedrooms === '3+') {
         conditions.push('bedrooms >= 3')
-      } else {
+      } else if (Number.isFinite(Number(bedrooms))) {
         params.push(Number(bedrooms))
         conditions.push(`bedrooms = $${params.length}`)
       }

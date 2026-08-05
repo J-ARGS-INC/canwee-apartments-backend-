@@ -9,6 +9,8 @@ const IBARA_ADDRESS =
 const listings = [
   {
     id: 'ikeja-unit-1-lagos',
+    unitCode: '4C',
+    bookingPrefix: 'IKE',
     title: 'Ikeja Apartment - Unit 1',
     city: 'Lagos',
     state: 'Lagos',
@@ -31,6 +33,8 @@ const listings = [
   },
   {
     id: 'ikeja-unit-2-lagos',
+    unitCode: '4D',
+    bookingPrefix: 'IKE',
     title: 'Ikeja Apartment - Unit 2',
     city: 'Lagos',
     state: 'Lagos',
@@ -53,6 +57,8 @@ const listings = [
   },
   {
     id: 'gbagada-unit-1-lagos',
+    unitCode: 'Ndubuisi Kanu Estate Unit',
+    bookingPrefix: 'GBA',
     title: 'Gbagada Apartment - Unit 1',
     city: 'Lagos',
     state: 'Lagos',
@@ -75,6 +81,8 @@ const listings = [
   },
   {
     id: 'china-downstairs-abeokuta',
+    unitCode: 'China 1',
+    bookingPrefix: 'ABE',
     title: 'The China Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -97,6 +105,8 @@ const listings = [
   },
   {
     id: 'london-abeokuta',
+    unitCode: 'London',
+    bookingPrefix: 'ABE',
     title: 'The London Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -119,6 +129,8 @@ const listings = [
   },
   {
     id: 'south-africa-abeokuta',
+    unitCode: 'South Africa',
+    bookingPrefix: 'ABE',
     title: 'The South Africa Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -141,6 +153,8 @@ const listings = [
   },
   {
     id: 'canada-abeokuta',
+    unitCode: 'Canada',
+    bookingPrefix: 'ABE',
     title: 'The Canada Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -163,6 +177,8 @@ const listings = [
   },
   {
     id: 'nairobi-abeokuta',
+    unitCode: 'Nairobi',
+    bookingPrefix: 'ABE',
     title: 'The Nairobi Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -185,6 +201,8 @@ const listings = [
   },
   {
     id: 'usa-abeokuta',
+    unitCode: 'USA',
+    bookingPrefix: 'ABE',
     title: 'The USA Suite, Ibara',
     city: 'Abeokuta',
     state: 'Ogun',
@@ -249,7 +267,7 @@ const faqs = [
   {
     question: 'How is Canwee different from a hotel booking?',
     answer:
-      "Every apartment on Canwee is a real, fully-furnished home — not a hotel room. You get a real kitchen, real square footage, and a neighborhood instead of a lobby. Pricing is shown up front with no resort fees or surprise charges added at checkout.",
+      "Every apartment on Canwee is a real, fully-furnished home, not a hotel room. You get a real kitchen, real square footage, and a neighborhood instead of a lobby. Pricing is shown up front with no resort fees or surprise charges added at checkout.",
   },
   {
     question: 'Are the listings verified?',
@@ -259,7 +277,7 @@ const faqs = [
   {
     question: 'What happens if I need to cancel?',
     answer:
-      'Cancellation terms are shown on every listing before you book, not after. Most stays can be cancelled with a full refund up to 7 days before check-in — see our Cancellation Policy page for the exact terms that apply to your dates.',
+      'Cancellation terms are shown on every listing before you book, not after. Most stays can be cancelled with a full refund up to 7 days before check-in. See our Cancellation Policy page for the exact terms that apply to your dates.',
   },
   {
     question: 'Is there a minimum or maximum length of stay?',
@@ -279,20 +297,45 @@ const faqs = [
 ]
 
 async function seed() {
-  // Full replace rather than upsert-by-id — the catalogue moved from the
-  // original demo cities to the real Lagos/Abeokuta portfolio, so old rows
-  // would otherwise be orphaned under IDs nothing references anymore.
-  await pool.query('delete from bookings')
-  await pool.query('delete from listing_images')
-  await pool.query('delete from listings')
-
+  // Upsert by id, NOT delete-and-reinsert: listings.id is a real foreign
+  // key that bookings, listing_images, and expenses all reference. This
+  // script used to `delete from bookings` / `delete from listing_images`
+  // before reinserting, which was fine while both were empty demo data —
+  // now that real guest bookings and real listing photos exist in
+  // production, that would silently destroy them every time someone reruns
+  // this script just to fix a typo in a description. Never reintroduce
+  // those deletes here.
   for (const listing of listings) {
     await pool.query(
       `insert into listings (
         id, title, city, state, neighborhood, address, price_per_night, bedrooms, bathrooms,
         max_guests, size_sqm, rating, review_count, tags, amenities, images,
-        description, long_description, host_name, host_joined_year, host_response_time, host_superhost
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+        description, long_description, host_name, host_joined_year, host_response_time, host_superhost,
+        unit_code, booking_prefix
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+      on conflict (id) do update set
+        title = excluded.title,
+        city = excluded.city,
+        state = excluded.state,
+        neighborhood = excluded.neighborhood,
+        address = excluded.address,
+        price_per_night = excluded.price_per_night,
+        bedrooms = excluded.bedrooms,
+        bathrooms = excluded.bathrooms,
+        max_guests = excluded.max_guests,
+        size_sqm = excluded.size_sqm,
+        rating = excluded.rating,
+        review_count = excluded.review_count,
+        tags = excluded.tags,
+        amenities = excluded.amenities,
+        description = excluded.description,
+        long_description = excluded.long_description,
+        host_name = excluded.host_name,
+        host_joined_year = excluded.host_joined_year,
+        host_response_time = excluded.host_response_time,
+        host_superhost = excluded.host_superhost,
+        unit_code = excluded.unit_code,
+        booking_prefix = excluded.booking_prefix`,
       [
         listing.id,
         listing.title,
@@ -316,6 +359,8 @@ async function seed() {
         listing.host.joinedYear,
         listing.host.responseTime,
         listing.host.superhost,
+        listing.unitCode,
+        listing.bookingPrefix,
       ],
     )
   }
@@ -337,7 +382,6 @@ async function seed() {
   }
 
   console.log(`Seeded ${listings.length} listings, ${testimonials.length} testimonials, ${faqs.length} faqs.`)
-  console.log('Run "node db/import-images.js" next to load listing photos.')
   await pool.end()
 }
 

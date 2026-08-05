@@ -1,10 +1,28 @@
 import { Router } from 'express'
 import { pool } from '../db.js'
-import { isValidEmail, requireString } from '../lib/validate.js'
+import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
+import { sendCustomerEmail, sendNotificationEmail } from '../lib/notify.js'
+import { bookingAdminNotificationEmail, bookingGuestConfirmationEmail } from '../lib/emailTemplates.js'
+import { createSubmissionLimiter } from '../middleware/rateLimiters.js'
+import { idempotent } from '../middleware/idempotency.js'
 
 const router = Router()
 
-router.post('/', async (req, res, next) => {
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canweeapartments.com'
+const ADMIN_DASHBOARD_URL = process.env.ADMIN_DASHBOARD_URL || FRONTEND_URL
+
+function formatNaira(amount) {
+  return new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 }).format(
+    amount,
+  )
+}
+
+function nightsBetween(checkIn, checkOut) {
+  const ms = new Date(checkOut) - new Date(checkIn)
+  return Math.max(0, Math.round(ms / (1000 * 60 * 60 * 24)))
+}
+
+router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next) => {
   try {
     const { listingId, fullName, email, phone, checkIn, checkOut, guests, notes } = req.body ?? {}
 
@@ -12,11 +30,23 @@ router.post('/', async (req, res, next) => {
     requireString(listingId, 'listingId', errors)
     requireString(fullName, 'fullName', errors)
     requireString(phone, 'phone', errors)
-    requireString(checkIn, 'checkIn', errors)
-    requireString(checkOut, 'checkOut', errors)
+    maxLength(fullName, 'fullName', 200, errors)
+    maxLength(phone, 'phone', 30, errors)
+    maxLength(email, 'email', 200, errors)
+    maxLength(notes, 'notes', 2000, errors)
+
+    const today = new Date().toISOString().slice(0, 10)
+    if (!isValidDate(checkIn)) {
+      errors.checkIn = 'Enter a valid check-in date.'
+    } else if (checkIn < today) {
+      errors.checkIn = 'Check-in cannot be in the past.'
+    }
+    if (!isValidDate(checkOut)) errors.checkOut = 'Enter a valid check-out date.'
+    if (!errors.checkIn && !errors.checkOut && checkOut <= checkIn) {
+      errors.checkOut = 'Check-out must be after check-in.'
+    }
 
     if (!email || !isValidEmail(email)) errors.email = 'Enter a valid email address.'
-    if (checkIn && checkOut && checkOut <= checkIn) errors.checkOut = 'Check-out must be after check-in.'
 
     const guestCount = Number(guests)
     if (!guests || guestCount < 1) errors.guests = 'Enter at least 1 guest.'
@@ -25,7 +55,10 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: 'Validation failed', fields: errors })
     }
 
-    const { rows: listingRows } = await pool.query('select max_guests from listings where id = $1', [listingId])
+    const { rows: listingRows } = await pool.query(
+      'select title, city, price_per_night, max_guests from listings where id = $1',
+      [listingId],
+    )
     if (listingRows.length === 0) {
       return res.status(404).json({ error: 'Listing not found' })
     }
@@ -36,13 +69,57 @@ router.post('/', async (req, res, next) => {
       })
     }
 
-    const { rows } = await pool.query(
-      `insert into bookings (listing_id, full_name, email, phone, check_in, check_out, guests, notes)
-       values ($1,$2,$3,$4,$5,$6,$7,$8) returning id, status`,
-      [listingId, fullName, email, phone, checkIn, checkOut, guestCount, notes || null],
-    )
+    const listing = listingRows[0]
+    const nights = nightsBetween(checkIn, checkOut)
+    const totalAmount = nights * listing.price_per_night
 
-    res.status(201).json({ id: rows[0].id, status: rows[0].status })
+    const { rows } = await pool.query(
+      `insert into bookings (
+        listing_id, full_name, email, phone, check_in, check_out, guests, notes,
+        rate_per_night, total_amount, source_channel
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id, booking_code, status`,
+      [
+        listingId, fullName, email, phone, checkIn, checkOut, guestCount, notes || null,
+        listing.price_per_night, totalAmount, 'Website',
+      ],
+    )
+    const statusUrl = `${FRONTEND_URL}/booking-status?id=${rows[0].id}`
+
+    sendCustomerEmail({
+      to: email,
+      name: fullName,
+      subject: `We've received your booking request for ${listing.title}`,
+      html: bookingGuestConfirmationEmail({
+        fullName,
+        listingTitle: listing.title,
+        checkIn,
+        checkOut,
+        guests: guestCount,
+        pricePerNight: formatNaira(listing.price_per_night),
+        nights,
+        bookingId: rows[0].id,
+        statusUrl,
+      }),
+    })
+
+    sendNotificationEmail({
+      subject: `New booking request: ${listing.title}`,
+      html: bookingAdminNotificationEmail({
+        listingTitle: listing.title,
+        listingCity: listing.city,
+        checkIn,
+        checkOut,
+        guests: guestCount,
+        fullName,
+        email,
+        phone,
+        notes,
+        bookingId: rows[0].id,
+        dashboardUrl: ADMIN_DASHBOARD_URL,
+      }),
+    })
+
+    res.status(201).json({ id: rows[0].id, bookingCode: rows[0].booking_code, status: rows[0].status })
   } catch (err) {
     next(err)
   }
@@ -52,7 +129,7 @@ router.get('/:id', async (req, res, next) => {
   try {
     const { id } = req.params
     const { rows } = await pool.query(
-      `select b.id, b.status, b.check_in, b.check_out, b.guests,
+      `select b.id, b.booking_code, b.status, b.check_in, b.check_out, b.guests,
               b.actual_check_in_at, b.actual_check_out_at,
               l.title as listing_title, l.city as listing_city
        from bookings b
