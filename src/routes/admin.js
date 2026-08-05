@@ -109,8 +109,8 @@ router.post('/login', loginLimiter, async (req, res, next) => {
   }
 })
 
-router.use(adminLimiter)
 router.use(requireAdmin)
+router.use(adminLimiter)
 
 router.get('/verify', (req, res) => {
   res.json({ ok: true, adminId: req.adminId, displayName: req.adminDisplayName, role: req.adminRole })
@@ -126,8 +126,23 @@ router.get('/bookings', async (req, res, next) => {
       where = 'where b.status = $1'
     }
 
-    const { rows } = await pool.query(`${BOOKING_SELECT} ${where} order by b.check_in desc`, params)
-    res.json(rows)
+    // Paginated so the list stays fast and manageable as bookings pile up
+    // over time — newest first, older ones only loaded on request (the
+    // "Load more" button in BookingsTab) rather than all at once. The
+    // Excel export uses its own unpaginated query in adminReports.js, so
+    // it's unaffected and always includes the full history.
+    const limitNum = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
+    const offsetNum = Math.max(0, Number(req.query.offset) || 0)
+
+    const { rows: countRows } = await pool.query(`select count(*) from bookings b ${where}`, params)
+    const total = Number(countRows[0].count)
+
+    const { rows } = await pool.query(
+      `${BOOKING_SELECT} ${where} order by b.check_in desc limit $${params.length + 1} offset $${params.length + 2}`,
+      [...params, limitNum, offsetNum],
+    )
+
+    res.json({ bookings: rows, total })
   } catch (err) {
     next(err)
   }
@@ -205,6 +220,15 @@ router.post('/bookings', async (req, res, next) => {
 
     res.status(201).json(rows[0])
   } catch (err) {
+    // See the matching handler in routes/bookings.js — the database's
+    // exclusion constraint, not application logic, is what actually
+    // prevents two overlapping bookings for the same unit from both
+    // committing, including a guest and an admin racing each other.
+    if (err.code === '23P01') {
+      return res.status(409).json({
+        error: 'This unit is already booked for an overlapping date range.',
+      })
+    }
     next(err)
   }
 })
@@ -256,14 +280,31 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
       return res.status(404).json({ error: 'Booking not found' })
     }
 
+    // Optimistic concurrency: the client sends back the `updated_at` it
+    // last saw (set when the edit form was opened). If someone else saved a
+    // change to this booking in the meantime, that value has moved on and
+    // this WHERE clause matches zero rows instead of silently overwriting
+    // their edit — the alternative (updating unconditionally by id alone)
+    // is a classic lost-update bug: two admins editing the same booking at
+    // once, second save wins, first admin's change vanishes with no error.
+    let versionClause = ''
+    if (typeof body.expectedUpdatedAt === 'string' && body.expectedUpdatedAt) {
+      params.push(body.expectedUpdatedAt)
+      versionClause = ` and updated_at = $${params.length}`
+    }
+
     params.push(id)
     const { rows } = await pool.query(
-      `update bookings set ${setClauses.join(', ')}, updated_at = now() where id = $${params.length} returning id`,
+      `update bookings set ${setClauses.join(', ')}, updated_at = now()
+       where id = $${params.length}${versionClause}
+       returning id`,
       params,
     )
 
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Booking not found' })
+      return res.status(409).json({
+        error: 'This booking was changed by someone else since you opened it. Reload and try again.',
+      })
     }
 
     const { rows: full } = await pool.query(`${BOOKING_SELECT} where b.id = $1`, [id])
@@ -301,18 +342,6 @@ router.patch('/bookings/:id', async (req, res, next) => {
       return res.status(400).json({ error: `Unknown action "${action}".` })
     }
 
-    const { rows } = await pool.query('select status from bookings where id = $1', [id])
-    if (rows.length === 0) {
-      return res.status(404).json({ error: 'Booking not found' })
-    }
-
-    const currentStatus = rows[0].status
-    if (!transition.from.includes(currentStatus)) {
-      return res.status(409).json({
-        error: `Cannot ${action.replace('-', ' ')} a booking that is currently "${currentStatus}".`,
-      })
-    }
-
     const timestampColumn =
       transition.to === 'checked_in'
         ? 'actual_check_in_at'
@@ -320,23 +349,64 @@ router.patch('/bookings/:id', async (req, res, next) => {
           ? 'actual_check_out_at'
           : null
 
-    const { rows: updated } = await pool.query(
-      `update bookings
-       set status = $1, updated_at = now()${timestampColumn ? `, ${timestampColumn} = now()` : ''}
-       where id = $2
-       returning id, status, actual_check_in_at, actual_check_out_at, updated_at`,
-      [transition.to, id],
-    )
+    // A separate "read the status, check it in JS, then update" has a race
+    // window between the read and the write: two admins both hitting
+    // check-in/cancel/etc on the same booking at nearly the same instant can
+    // both read the same starting status, both pass their own from-check,
+    // and both update — the second write silently overwrites the first with
+    // no error, even though it logs an audit entry claiming its transition
+    // succeeded. `select ... for update` inside a transaction closes that
+    // window: it takes a row lock, so a second concurrent request's own
+    // `for update` blocks until the first transaction commits, then sees
+    // the already-updated status — its from-check then correctly fails
+    // against the new state instead of the stale one it would have read
+    // without the lock.
+    const client = await pool.connect()
+    let result
+    try {
+      await client.query('BEGIN')
+      const { rows: locked } = await client.query('select status from bookings where id = $1 for update', [id])
 
-    logAudit({
-      entityType: 'booking',
-      entityId: id,
-      action: 'status_change',
-      changes: { status: { old: currentStatus, new: transition.to } },
-      actor: req.adminId,
-    })
+      if (locked.length === 0) {
+        await client.query('ROLLBACK')
+        result = { status: 404, body: { error: 'Booking not found' } }
+      } else if (!transition.from.includes(locked[0].status)) {
+        await client.query('ROLLBACK')
+        result = {
+          status: 409,
+          body: {
+            error: `Cannot ${action.replace('-', ' ')} a booking that is currently "${locked[0].status}". Someone may have just updated it.`,
+          },
+        }
+      } else {
+        const previousStatus = locked[0].status
+        const { rows: updated } = await client.query(
+          `update bookings
+           set status = $1, updated_at = now()${timestampColumn ? `, ${timestampColumn} = now()` : ''}
+           where id = $2
+           returning id, status, actual_check_in_at, actual_check_out_at, updated_at`,
+          [transition.to, id],
+        )
+        await client.query('COMMIT')
 
-    res.json(updated[0])
+        logAudit({
+          entityType: 'booking',
+          entityId: id,
+          action: 'status_change',
+          changes: { status: { old: previousStatus, new: transition.to } },
+          actor: req.adminId,
+        })
+
+        result = { status: 200, body: updated[0] }
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+
+    res.status(result.status).json(result.body)
   } catch (err) {
     next(err)
   }

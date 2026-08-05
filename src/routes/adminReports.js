@@ -6,8 +6,8 @@ import { adminLimiter } from '../middleware/rateLimiters.js'
 
 const router = Router()
 
-router.use(adminLimiter)
 router.use(requireAdmin)
+router.use(adminLimiter)
 
 router.get('/audit-log', async (req, res, next) => {
   try {

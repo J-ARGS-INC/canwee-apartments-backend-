@@ -18,20 +18,33 @@ const EXPENSE_FIELDS = {
 
 const router = Router()
 
-router.use(adminLimiter)
 router.use(requireAdmin)
+router.use(adminLimiter)
 
 router.get('/', async (req, res, next) => {
   try {
+    // Paginated the same way as admin bookings — newest first, older
+    // entries loaded on request via "Load more" instead of all at once.
+    const limitNum = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
+    const offsetNum = Math.max(0, Number(req.query.offset) || 0)
+
+    const { rows: countRows } = await pool.query(
+      "select count(*), coalesce(sum(amount), 0) as total_amount from expenses where deleted_at is null",
+    )
+    const total = Number(countRows[0].count)
+    const totalAmount = Number(countRows[0].total_amount)
+
     const { rows } = await pool.query(
       `select e.id, e.expense_date, e.category, e.description, e.amount, e.listing_id,
-              e.paid_to, e.logged_by, e.notes, e.created_at, l.title as listing_title
+              e.paid_to, e.logged_by, e.notes, e.created_at, e.updated_at, l.title as listing_title
        from expenses e
        left join listings l on l.id = e.listing_id
        where e.deleted_at is null
-       order by e.expense_date desc, e.created_at desc`,
+       order by e.expense_date desc, e.created_at desc
+       limit $1 offset $2`,
+      [limitNum, offsetNum],
     )
-    res.json(rows)
+    res.json({ expenses: rows, total, totalAmount })
   } catch (err) {
     next(err)
   }
@@ -128,11 +141,30 @@ router.patch('/:id', async (req, res, next) => {
     const { rows: before } = await pool.query('select * from expenses where id = $1 and deleted_at is null', [id])
     if (before.length === 0) return res.status(404).json({ error: 'Expense not found' })
 
+    // Optimistic concurrency, same pattern as booking edits: the client
+    // sends back the `updated_at` it last saw. If another admin already
+    // saved a change to this expense, that value has moved on and this
+    // WHERE clause matches zero rows instead of silently overwriting their
+    // edit.
+    let versionClause = ''
+    if (typeof body.expectedUpdatedAt === 'string' && body.expectedUpdatedAt) {
+      params.push(body.expectedUpdatedAt)
+      versionClause = ` and updated_at = $${params.length}`
+    }
+
     params.push(id)
     const { rows: after } = await pool.query(
-      `update expenses set ${setClauses.join(', ')} where id = $${params.length} returning *`,
+      `update expenses set ${setClauses.join(', ')}, updated_at = now()
+       where id = $${params.length}${versionClause}
+       returning *`,
       params,
     )
+
+    if (after.length === 0) {
+      return res.status(409).json({
+        error: 'This expense was changed by someone else since you opened it. Reload and try again.',
+      })
+    }
 
     const changedKeys = Object.keys(body).filter((key) => key in EXPENSE_FIELDS)
     const beforeCamel = {}

@@ -243,3 +243,39 @@ alter table admin_users add column if not exists is_active boolean not null defa
 
 alter table admin_users drop constraint if exists admin_users_role_check;
 alter table admin_users add constraint admin_users_role_check check (role in ('admin', 'super_admin'));
+
+-- Concurrency safety (2026-08-06). Two requests racing to book the same
+-- unit for overlapping dates (two guests, or a guest and an admin entering
+-- a WhatsApp booking at the same moment) can both pass an application-level
+-- "check availability, then insert" check before either has committed — the
+-- check itself can't close that race, only the database can, by refusing to
+-- let a second overlapping row ever commit in the first place. `[)` bounds
+-- mean check-out day is not counted as occupied, so a same-day turnover
+-- (one guest leaves, another arrives) is correctly allowed, not blocked.
+-- Cancelled bookings are excluded from the check since they no longer hold
+-- the unit.
+create extension if not exists btree_gist;
+
+alter table bookings drop constraint if exists bookings_no_overlap;
+alter table bookings drop column if exists stay_range;
+alter table bookings add column stay_range daterange
+  generated always as (daterange(check_in, check_out, '[)')) stored;
+alter table bookings add constraint bookings_no_overlap
+  exclude using gist (listing_id with =, stay_range with &&)
+  where (status not in ('cancelled'));
+
+-- Optimistic concurrency for expense edits (2026-08-06), matching
+-- bookings.updated_at: lets PATCH /admin/expenses/:id detect and reject a
+-- write based on stale data (two admins editing the same expense at once)
+-- instead of silently letting the second save overwrite the first.
+alter table expenses add column if not exists updated_at timestamptz not null default now();
+
+-- Pinned to millisecond precision on both tables: the optimistic-concurrency
+-- checks in admin.js/adminExpenses.js compare this column against a value
+-- round-tripped through JS's Date.toISOString(), which only carries
+-- millisecond precision. Postgres timestamptz defaults to microsecond
+-- precision, so without this the stored value and the round-tripped value
+-- would never compare equal -- even for a first, non-conflicting edit -- and
+-- every edit would be wrongly rejected as a conflict.
+alter table bookings alter column updated_at type timestamptz(3);
+alter table expenses alter column updated_at type timestamptz(3);

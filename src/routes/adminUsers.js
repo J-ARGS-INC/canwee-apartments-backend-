@@ -14,9 +14,9 @@ function generatePassword() {
 
 const router = Router()
 
-router.use(adminLimiter)
 router.use(requireAdmin)
 router.use(requireSuperAdmin)
+router.use(adminLimiter)
 
 router.get('/', async (req, res, next) => {
   try {

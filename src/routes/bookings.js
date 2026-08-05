@@ -121,6 +121,16 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
 
     res.status(201).json({ id: rows[0].id, bookingCode: rows[0].booking_code, status: rows[0].status })
   } catch (err) {
+    // 23P01 = the bookings_no_overlap exclusion constraint rejected this
+    // insert because another booking (possibly created a moment ago by a
+    // concurrent request) already holds this unit for an overlapping date
+    // range. The database is the source of truth here, not a race-prone
+    // application-level availability check.
+    if (err.code === '23P01') {
+      return res.status(409).json({
+        error: 'Those dates were just booked for this apartment. Please choose different dates.',
+      })
+    }
     next(err)
   }
 })

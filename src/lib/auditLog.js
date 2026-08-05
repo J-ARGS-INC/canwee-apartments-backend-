@@ -1,9 +1,10 @@
 import { pool } from '../db.js'
 
 // Never throws — a failed audit write should never block the actual
-// operation it's recording. `actor` is self-reported (there's no
-// per-staff login yet, just one shared admin key), so this proves what
-// changed and when, not cryptographically who did it.
+// operation it's recording. `actor` is the admin id from requireAdmin,
+// which is re-verified against the database (not just the JWT) on every
+// request, so this reliably proves which authenticated admin made the
+// change, not just what changed and when.
 export async function logAudit({ entityType, entityId, action, changes, actor, reason }) {
   try {
     await pool.query(
