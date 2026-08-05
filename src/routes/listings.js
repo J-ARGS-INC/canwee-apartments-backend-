@@ -140,6 +140,31 @@ router.get('/:id', async (req, res, next) => {
   }
 })
 
+// Public, unauthenticated availability so a guest can see which dates are
+// already taken before submitting a request — deliberately returns only
+// date ranges, never who booked them or their payment/contact details
+// (unlike the admin availability endpoint, which is behind auth and does
+// include guest names). A booking's dates stop blocking the calendar the
+// moment its check-out date passes, whatever the booking's status is —
+// the [checkIn, checkOut) range itself is what's reserved, not the status.
+router.get('/:id/availability', async (req, res, next) => {
+  try {
+    const { rows: listingRows } = await pool.query('select id from listings where id = $1', [req.params.id])
+    if (listingRows.length === 0) return res.status(404).json({ error: 'Listing not found' })
+
+    const { rows } = await pool.query(
+      `select check_in, check_out
+       from bookings
+       where listing_id = $1 and status not in ('cancelled') and check_out >= current_date
+       order by check_in`,
+      [req.params.id],
+    )
+    res.json(rows.map((row) => ({ checkIn: row.check_in, checkOut: row.check_out })))
+  } catch (err) {
+    next(err)
+  }
+})
+
 router.get('/:id/related', async (req, res, next) => {
   try {
     const { rows: current } = await pool.query('select city from listings where id = $1', [req.params.id])

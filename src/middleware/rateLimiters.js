@@ -47,6 +47,19 @@ export const adminLimiter = rateLimit({
   keyGenerator: (req) => req.adminId || ipKeyGenerator(req.ip),
 })
 
+// Booking-code lookups are an unauthenticated read keyed by a short,
+// partially-predictable code (a sequential number behind a per-unit
+// prefix) — this exists specifically to make walking through codes
+// (IKE-0001, IKE-0002, ...) to enumerate other guests' stays impractical,
+// well before the general apiLimiter budget would ever stop it.
+export const bookingLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many lookups from this network. Please try again later.' },
+})
+
 // Login attempts guess a real (human-generated, guessable) password rather
 // than a 48-char random key, so this needs to be much tighter than the
 // general admin limiter — slows down credential-stuffing/brute-force

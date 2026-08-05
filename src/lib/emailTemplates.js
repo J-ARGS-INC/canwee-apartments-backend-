@@ -93,7 +93,7 @@ export function bookingGuestConfirmationEmail({
   guests,
   pricePerNight,
   nights,
-  bookingId,
+  bookingCode,
   statusUrl,
 }) {
   const firstName = fullName.trim().split(/\s+/)[0]
@@ -109,13 +109,13 @@ export function bookingGuestConfirmationEmail({
       ['Guests', String(guests)],
       ['Rate', `${pricePerNight} &times; ${nights} night${nights > 1 ? 's' : ''}`],
       ['Status', statusBadge('Pending confirmation')],
-      ['Booking ID', `<span style="font-family:monospace;font-size:12px;">${escapeHtml(bookingId)}</span>`],
+      ['Booking code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(bookingCode)}</span>`],
     ])}
     <p style="text-align:center;margin:0 0 20px;">
       ${ctaButton(statusUrl, 'Check your booking status')}
     </p>
     <p style="margin:0;font-size:13px;color:${COLORS.muted};text-align:center;">
-      Save your booking ID above. You can look up your status anytime.
+      Save your booking code above. You can look up your status anytime.
     </p>
   `)
 }
@@ -130,7 +130,7 @@ export function bookingAdminNotificationEmail({
   email,
   phone,
   notes,
-  bookingId,
+  bookingCode,
   dashboardUrl,
 }) {
   return shell(`
@@ -144,7 +144,7 @@ export function bookingAdminNotificationEmail({
       ['Email', escapeHtml(email)],
       ['Phone', escapeHtml(phone)],
       ...(notes ? [['Notes', escapeHtml(notes)]] : []),
-      ['Booking ID', `<span style="font-family:monospace;font-size:12px;">${escapeHtml(bookingId)}</span>`],
+      ['Booking code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(bookingCode)}</span>`],
     ])}
     <p style="text-align:center;margin:0;">
       ${ctaButton(dashboardUrl, 'Open admin dashboard')}

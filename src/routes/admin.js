@@ -39,6 +39,38 @@ function validateMoneyFields(body, errors) {
   }
 }
 
+// payment_status is a label an admin sets by hand, but amount_paid is what
+// actually drives revenue reporting (adminReports.js sums amount_paid, not
+// the label) — without this, an admin could switch a booking to "paid"
+// without the paid amount actually matching the total, so the sale would
+// show as paid in the list but not be reflected in collected revenue, or a
+// stale amount_paid could get labelled "paid" long after a discount changed
+// the total. This keeps the label and the number that's actually recorded
+// in sync at the moment either one changes.
+function validatePaymentConsistency({ paymentStatus, amountPaid, totalAmount }, errors) {
+  if (!paymentStatus) return
+  const paid = Number(amountPaid) || 0
+  const total = totalAmount != null ? Number(totalAmount) : null
+
+  if (paymentStatus === 'unpaid') {
+    if (paid > 0) errors.paymentStatus = 'Amount paid must be 0 for an unpaid booking.'
+    return
+  }
+
+  if (total == null) {
+    errors.paymentStatus = `Set a total amount before marking this booking as ${paymentStatus.replace('_', ' ')}.`
+    return
+  }
+
+  if (paymentStatus === 'part_payment' && !(paid > 0 && paid < total)) {
+    errors.paymentStatus = 'Amount paid must be more than 0 and less than the total for a part payment.'
+  } else if (paymentStatus === 'paid' && Math.abs(paid - total) > 0.01) {
+    errors.paymentStatus = 'Amount paid must equal the total amount to mark this booking as paid.'
+  } else if (paymentStatus === 'overpaid' && !(paid > total)) {
+    errors.paymentStatus = 'Amount paid must be more than the total to mark this booking as overpaid.'
+  }
+}
+
 const router = Router()
 
 const TRANSITIONS = {
@@ -193,6 +225,14 @@ router.post('/bookings', async (req, res, next) => {
     const nights = Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)))
     const discountAmount = discount != null ? Number(discount) : 0
     const total = totalAmount != null ? Number(totalAmount) : nights * rate - discountAmount
+    const paidAmount = amountPaid != null ? Number(amountPaid) : 0
+    const paymentStatusValue = paymentStatus || 'unpaid'
+
+    const paymentErrors = {}
+    validatePaymentConsistency({ paymentStatus: paymentStatusValue, amountPaid: paidAmount, totalAmount: total }, paymentErrors)
+    if (Object.keys(paymentErrors).length > 0) {
+      return res.status(400).json({ error: 'Validation failed', fields: paymentErrors })
+    }
 
     const { rows } = await pool.query(
       `insert into bookings (
@@ -204,8 +244,8 @@ router.post('/bookings', async (req, res, next) => {
       [
         listingId, fullName, email || null, phone, checkIn, checkOut, guestCount, notes || null,
         status || 'pending', bookingDate || new Date().toISOString().slice(0, 10), rate,
-        discountAmount, total, amountPaid != null ? Number(amountPaid) : 0,
-        paymentStatus || 'unpaid', paymentMethod || null, paymentDate || null,
+        discountAmount, total, paidAmount,
+        paymentStatusValue, paymentMethod || null, paymentDate || null,
         sourceChannel || null, receivedBy || null,
       ],
     )
@@ -278,6 +318,28 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
     const { rows: before } = await pool.query(`${BOOKING_SELECT} where b.id = $1`, [id])
     if (before.length === 0) {
       return res.status(404).json({ error: 'Booking not found' })
+    }
+
+    // Only re-check consistency when a payment-related field is actually
+    // part of this edit — an unrelated edit (e.g. fixing a typo in the
+    // guest's phone number) on an older booking that predates this check
+    // shouldn't suddenly get blocked by a mismatch it didn't create.
+    if ('paymentStatus' in body || 'amountPaid' in body || 'totalAmount' in body) {
+      const effectivePaymentStatus = 'paymentStatus' in body ? body.paymentStatus : before[0].payment_status
+      const effectiveAmountPaid = 'amountPaid' in body ? Number(body.amountPaid) : Number(before[0].amount_paid)
+      const effectiveTotalAmount =
+        'totalAmount' in body
+          ? (body.totalAmount != null ? Number(body.totalAmount) : null)
+          : (before[0].total_amount != null ? Number(before[0].total_amount) : null)
+
+      const paymentErrors = {}
+      validatePaymentConsistency(
+        { paymentStatus: effectivePaymentStatus, amountPaid: effectiveAmountPaid, totalAmount: effectiveTotalAmount },
+        paymentErrors,
+      )
+      if (Object.keys(paymentErrors).length > 0) {
+        return res.status(400).json({ error: 'Validation failed', fields: paymentErrors })
+      }
     }
 
     // Optimistic concurrency: the client sends back the `updated_at` it

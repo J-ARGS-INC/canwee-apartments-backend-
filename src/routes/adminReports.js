@@ -150,7 +150,7 @@ router.get('/export/workbook.xlsx', async (req, res, next) => {
 
     const bookingsSheet = workbook.addWorksheet('Bookings')
     bookingsSheet.columns = [
-      { header: 'Booking ID', key: 'booking_code', width: 12 },
+      { header: 'Booking Code', key: 'booking_code', width: 12 },
       { header: 'Booking Date', key: 'booking_date', width: 14 },
       { header: 'Guest Name', key: 'full_name', width: 22 },
       { header: 'Phone Number', key: 'phone', width: 16 },

@@ -3,10 +3,16 @@ import { pool } from '../db.js'
 import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
 import { sendCustomerEmail, sendNotificationEmail } from '../lib/notify.js'
 import { bookingAdminNotificationEmail, bookingGuestConfirmationEmail } from '../lib/emailTemplates.js'
-import { createSubmissionLimiter } from '../middleware/rateLimiters.js'
+import { createSubmissionLimiter, bookingLookupLimiter } from '../middleware/rateLimiters.js'
 import { idempotent } from '../middleware/idempotency.js'
 
 const router = Router()
+
+// Matches the codes set_booking_code() generates in schema.sql: an
+// operator-chosen prefix (their existing per-unit convention, e.g. IKE,
+// ABE) plus a zero-padded sequence number. Checked before ever touching
+// the database so a malformed guess is rejected for free.
+const BOOKING_CODE_PATTERN = /^[A-Z0-9]{2,10}-\d{3,8}$/
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canweeapartments.com'
 const ADMIN_DASHBOARD_URL = process.env.ADMIN_DASHBOARD_URL || FRONTEND_URL
@@ -83,7 +89,7 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
         listing.price_per_night, totalAmount, 'Website',
       ],
     )
-    const statusUrl = `${FRONTEND_URL}/booking-status?id=${rows[0].id}`
+    const statusUrl = `${FRONTEND_URL}/booking-status?code=${encodeURIComponent(rows[0].booking_code)}`
 
     sendCustomerEmail({
       to: email,
@@ -97,7 +103,7 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
         guests: guestCount,
         pricePerNight: formatNaira(listing.price_per_night),
         nights,
-        bookingId: rows[0].id,
+        bookingCode: rows[0].booking_code,
         statusUrl,
       }),
     })
@@ -114,7 +120,7 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
         email,
         phone,
         notes,
-        bookingId: rows[0].id,
+        bookingCode: rows[0].booking_code,
         dashboardUrl: ADMIN_DASHBOARD_URL,
       }),
     })
@@ -135,28 +141,35 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
   }
 })
 
-router.get('/:id', async (req, res, next) => {
+// Public status lookup by the human-readable booking code (not the
+// internal uuid) — this is what guests actually have on hand from their
+// confirmation email/SMS. Rate-limited and format-checked specifically
+// because, unlike the uuid, this code is short and partially predictable,
+// so it needs its own guard against someone walking through codes to see
+// other guests' stay dates/status.
+router.get('/code/:code', bookingLookupLimiter, async (req, res, next) => {
   try {
-    const { id } = req.params
+    const code = String(req.params.code || '').trim().toUpperCase()
+    if (!BOOKING_CODE_PATTERN.test(code)) {
+      return res.status(404).json({ error: 'No booking found with that code.' })
+    }
+
     const { rows } = await pool.query(
-      `select b.id, b.booking_code, b.status, b.check_in, b.check_out, b.guests,
+      `select b.booking_code, b.status, b.check_in, b.check_out, b.guests,
               b.actual_check_in_at, b.actual_check_out_at,
               l.title as listing_title, l.city as listing_city
        from bookings b
        join listings l on l.id = b.listing_id
-       where b.id = $1`,
-      [id],
+       where b.booking_code = $1`,
+      [code],
     )
 
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'No booking found with that ID.' })
+      return res.status(404).json({ error: 'No booking found with that code.' })
     }
 
     res.json(rows[0])
   } catch (err) {
-    if (err.code === '22P02') {
-      return res.status(404).json({ error: 'No booking found with that ID.' })
-    }
     next(err)
   }
 })
