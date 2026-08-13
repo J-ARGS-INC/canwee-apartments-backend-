@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "migrate": "node db/migrate.js",
     "seed": "node db/seed.js",
-    "seed:admins": "node db/seedAdmins.js"
+    "seed:admins": "node db/seedAdmins.js",
+    "import:videos": "node db/importVideos.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

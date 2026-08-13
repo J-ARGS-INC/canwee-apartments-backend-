@@ -265,14 +265,44 @@ const testimonials = [
 
 const faqs = [
   {
-    question: 'How is Canwee different from a hotel booking?',
+    question: 'Where are Canwee Apartments located?',
     answer:
-      "Every apartment on Canwee is a real, fully-furnished home, not a hotel room. You get a real kitchen, real square footage, and a neighborhood instead of a lobby. Pricing is shown up front with no resort fees or surprise charges added at checkout.",
+      'Canwee Apartments currently offers furnished shortlet & serviced apartments in Ikeja and Gbagada, Lagos, and Abeokuta, Ogun State.',
   },
   {
-    question: 'Are the listings verified?',
+    question: 'Do you have shortlet apartments in Ikeja?',
     answer:
-      "Yes. Every property goes through a verification step before it appears in search results, including a review of photos, amenities, and the host's response history. Listings that fall out of good standing are removed from search.",
+      'Yes. We offer fully furnished two-bedroom shortlet apartments in Ikeja, Lagos, around the Alausa axis.',
+  },
+  {
+    question: 'Do you have a shortlet apartment in Gbagada?',
+    answer:
+      'Yes. Canwee Apartments operates a furnished two-bedroom shortlet apartment in Gbagada, Lagos, within Ndubuisi Kanu Estate.',
+  },
+  {
+    question: 'What types of apartments are available?',
+    answer:
+      'We offer furnished one-bedroom and two-bedroom apartments, depending on the location and availability.',
+  },
+  {
+    question: 'Can I book for several weeks or a month?',
+    answer:
+      'Yes. Canwee Apartments accepts both short and extended stays, subject to apartment availability.',
+  },
+  {
+    question: 'Are the apartments furnished?',
+    answer:
+      'Yes. Our apartments are fully furnished and include living spaces, bedrooms, kitchens and other amenities required for a comfortable stay.',
+  },
+  {
+    question: 'Do the apartments have Wi-Fi and power?',
+    answer:
+      'Our apartments provide internet access and reliable power arrangements to keep guests comfortable and connected throughout their stay.',
+  },
+  {
+    question: 'How do I book?',
+    answer:
+      'Use the apartment search on the website to select your preferred location and dates, or contact Canwee Apartments directly to confirm availability.',
   },
   {
     question: 'What happens if I need to cancel?',
@@ -280,19 +310,14 @@ const faqs = [
       'Cancellation terms are shown on every listing before you book, not after. Most stays can be cancelled with a full refund up to 7 days before check-in. See our Cancellation Policy page for the exact terms that apply to your dates.',
   },
   {
-    question: 'Is there a minimum or maximum length of stay?',
-    answer:
-      "Most apartments accept stays from 2 nights up to several months. If you're planning an extended stay, message the host directly from the listing page to confirm availability and any long-stay pricing.",
-  },
-  {
     question: 'How do I get the keys or access code?',
     answer:
-      "Check-in instructions and access details are sent automatically 24 hours before arrival. Instructions are also available anytime from your booking confirmation.",
+      'Check-in instructions and access details are sent automatically 24 hours before arrival. Instructions are also available anytime from your booking confirmation.',
   },
   {
     question: "What if the apartment isn't as described?",
     answer:
-      "Contact our support team within 24 hours of check-in through the Contact page and we'll work with you and the host on a resolution, which can include relocation or a partial refund depending on the issue.",
+      "Contact our support team within 24 hours of check-in through the Contact page and we'll work with you on a resolution, which can include relocation or a partial refund depending on the issue.",
   },
 ]
 

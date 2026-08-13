@@ -3,7 +3,7 @@ import { pool } from '../db.js'
 
 const router = Router()
 
-function mapListing(row, baseUrl, imagesByListing) {
+function mapListing(row, baseUrl, imagesByListing, videosByListing) {
   return {
     id: row.id,
     title: row.title,
@@ -22,6 +22,7 @@ function mapListing(row, baseUrl, imagesByListing) {
     tags: row.tags,
     amenities: row.amenities,
     images: (imagesByListing.get(row.id) || []).map((imageId) => `${baseUrl}/api/images/${imageId}`),
+    videos: (videosByListing?.get(row.id) || []).map((videoId) => `${baseUrl}/api/videos/${videoId}`),
     description: row.description,
     longDescription: row.long_description,
     host: {
@@ -52,6 +53,21 @@ async function fetchImagesByListing(listingIds) {
   return imagesByListing
 }
 
+async function fetchVideosByListing(listingIds) {
+  const videosByListing = new Map()
+  if (listingIds.length === 0) return videosByListing
+
+  const { rows } = await pool.query(
+    'select id, listing_id from listing_videos where listing_id = any($1::text[]) order by listing_id, sort_order',
+    [listingIds],
+  )
+  for (const row of rows) {
+    if (!videosByListing.has(row.listing_id)) videosByListing.set(row.listing_id, [])
+    videosByListing.get(row.listing_id).push(row.id)
+  }
+  return videosByListing
+}
+
 // Express parses repeated query keys (?city=a&city=b) as arrays, which
 // would otherwise get bound straight into a parameterized query and throw
 // a Postgres type error. Coercing anything non-string to undefined keeps
@@ -70,6 +86,7 @@ const SORTS = {
 router.get('/', async (req, res, next) => {
   try {
     const city = asString(req.query.city)
+    const neighborhood = asString(req.query.neighborhood)
     const guests = asString(req.query.guests)
     const bedrooms = asString(req.query.bedrooms)
     const price = asString(req.query.price)
@@ -82,6 +99,10 @@ router.get('/', async (req, res, next) => {
     if (city) {
       params.push(city)
       conditions.push(`city = $${params.length}`)
+    }
+    if (neighborhood) {
+      params.push(neighborhood)
+      conditions.push(`neighborhood = $${params.length}`)
     }
     if (guests && Number.isFinite(Number(guests))) {
       params.push(Number(guests))
@@ -112,8 +133,11 @@ router.get('/', async (req, res, next) => {
       params,
     )
     const baseUrl = getBaseUrl(req)
-    const imagesByListing = await fetchImagesByListing(rows.map((row) => row.id))
-    res.json(rows.map((row) => mapListing(row, baseUrl, imagesByListing)))
+    const [imagesByListing, videosByListing] = await Promise.all([
+      fetchImagesByListing(rows.map((row) => row.id)),
+      fetchVideosByListing(rows.map((row) => row.id)),
+    ])
+    res.json(rows.map((row) => mapListing(row, baseUrl, imagesByListing, videosByListing)))
   } catch (err) {
     next(err)
   }
@@ -133,8 +157,11 @@ router.get('/:id', async (req, res, next) => {
     const { rows } = await pool.query('select * from listings where id = $1', [req.params.id])
     if (rows.length === 0) return res.status(404).json({ error: 'Listing not found' })
     const baseUrl = getBaseUrl(req)
-    const imagesByListing = await fetchImagesByListing([rows[0].id])
-    res.json(mapListing(rows[0], baseUrl, imagesByListing))
+    const [imagesByListing, videosByListing] = await Promise.all([
+      fetchImagesByListing([rows[0].id]),
+      fetchVideosByListing([rows[0].id]),
+    ])
+    res.json(mapListing(rows[0], baseUrl, imagesByListing, videosByListing))
   } catch (err) {
     next(err)
   }

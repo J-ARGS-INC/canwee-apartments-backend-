@@ -10,6 +10,7 @@ import adminExpensesRouter from './routes/adminExpenses.js'
 import adminReportsRouter from './routes/adminReports.js'
 import adminUsersRouter from './routes/adminUsers.js'
 import imagesRouter from './routes/images.js'
+import videosRouter from './routes/videos.js'
 import analyticsRouter from './routes/analytics.js'
 import { apiLimiter } from './middleware/rateLimiters.js'
 
@@ -44,6 +45,7 @@ export function createApp() {
   app.use('/api/contact', contactRouter)
   app.use('/api', contentRouter)
   app.use('/api', imagesRouter)
+  app.use('/api', videosRouter)
   app.use('/api/admin', adminRouter)
   app.use('/api/admin/expenses', adminExpensesRouter)
   app.use('/api/admin', adminReportsRouter)

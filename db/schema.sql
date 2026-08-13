@@ -279,3 +279,20 @@ alter table expenses add column if not exists updated_at timestamptz not null de
 -- every edit would be wrongly rejected as a conflict.
 alter table bookings alter column updated_at type timestamptz(3);
 alter table expenses alter column updated_at type timestamptz(3);
+
+-- Listing videos (2026-08-13), stored the same way as listing_images
+-- (bytea in Postgres, not the frontend/object storage) so the storage
+-- model stays consistent. Served through a dedicated route rather than
+-- reusing /api/images/:id because video playback needs HTTP Range support
+-- (seeking, and Safari refuses to play <video> at all without it) which
+-- images never needed.
+create table if not exists listing_videos (
+  id uuid primary key default gen_random_uuid(),
+  listing_id text not null references listings(id) on delete cascade,
+  sort_order int not null default 0,
+  content_type text not null default 'video/mp4',
+  data bytea not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists listing_videos_listing_id_idx on listing_videos (listing_id, sort_order);

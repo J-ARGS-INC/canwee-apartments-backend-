@@ -180,6 +180,25 @@ router.get('/bookings', async (req, res, next) => {
   }
 })
 
+// Front-desk lookup: reception has a guest standing in front of them with
+// only the booking code from their confirmation email, and needs to
+// confirm this is genuinely the person who reserved the room before
+// handing over keys/access. Unlike the public GET /api/bookings/code/:code
+// (rate-limited, no PII, for a guest checking their own status), this is
+// authenticated admin access and deliberately returns the full record —
+// name, phone, email — so staff can actually verify identity, plus enough
+// context (unit, dates, payment status) to decide whether check-in should
+// proceed at all (e.g. an unpaid balance).
+router.get('/bookings/lookup/:code', async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`${BOOKING_SELECT} where b.booking_code = $1`, [req.params.code.trim().toUpperCase()])
+    if (rows.length === 0) return res.status(404).json({ error: 'No booking found with that code.' })
+    res.json(rows[0])
+  } catch (err) {
+    next(err)
+  }
+})
+
 // Manual entry for offline bookings (WhatsApp, Instagram, phone, walk-in,
 // or backfilling historical records from the spreadsheet). Unlike the
 // public POST /api/bookings, this skips guest-facing validation/emails —
