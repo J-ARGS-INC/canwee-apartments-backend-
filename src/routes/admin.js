@@ -2,7 +2,7 @@ import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { pool } from '../db.js'
-import { requireAdmin } from '../middleware/adminAuth.js'
+import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter, loginLimiter } from '../middleware/rateLimiters.js'
 import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
@@ -87,6 +87,7 @@ const BOOKING_SELECT = `
          b.rate_per_night, b.discount, b.total_amount, b.amount_paid, b.balance,
          b.payment_status, b.payment_method, b.payment_date, b.source_channel, b.received_by,
          b.actual_check_in_at, b.actual_check_out_at, b.created_at, b.updated_at,
+         b.checkout_reason, b.checked_out_by, b.checkout_reviewed_by, b.checkout_reviewed_at,
          l.title as listing_title, l.city as listing_city, l.unit_code, l.bedrooms
   from bookings b
   join listings l on l.id = b.listing_id
@@ -444,7 +445,7 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
 router.patch('/bookings/:id', async (req, res, next) => {
   try {
     const { id } = req.params
-    const { action } = req.body ?? {}
+    const { action, reason } = req.body ?? {}
 
     const transition = TRANSITIONS[action]
     if (!transition) {
@@ -474,7 +475,7 @@ router.patch('/bookings/:id', async (req, res, next) => {
     let result
     try {
       await client.query('BEGIN')
-      const { rows: locked } = await client.query('select status from bookings where id = $1 for update', [id])
+      const { rows: locked } = await client.query('select status, balance from bookings where id = $1 for update', [id])
 
       if (locked.length === 0) {
         await client.query('ROLLBACK')
@@ -488,25 +489,48 @@ router.patch('/bookings/:id', async (req, res, next) => {
           },
         }
       } else {
-        const previousStatus = locked[0].status
-        const { rows: updated } = await client.query(
-          `update bookings
-           set status = $1, updated_at = now()${timestampColumn ? `, ${timestampColumn} = now()` : ''}
-           where id = $2
-           returning id, status, actual_check_in_at, actual_check_out_at, updated_at`,
-          [transition.to, id],
-        )
-        await client.query('COMMIT')
+        // A guest is physically leaving — the system doesn't get to block
+        // that in real time — but checking out with money still owed needs
+        // a reason on record and gets flagged for the super admin to review
+        // (see GET/PATCH /admin/checkouts/owing). The real balance comes
+        // from the row just locked, never a client-supplied value.
+        const owesMoney = transition.to === 'checked_out' && Number(locked[0].balance) > 0
+        if (owesMoney && (typeof reason !== 'string' || !reason.trim())) {
+          await client.query('ROLLBACK')
+          result = {
+            status: 400,
+            body: {
+              error: 'This guest still owes a balance. Enter a reason for checking out without full payment.',
+              fields: { reason: 'A reason is required to check out a guest with an outstanding balance.' },
+            },
+          }
+        } else {
+          const previousStatus = locked[0].status
+          const { rows: updated } = await client.query(
+            `update bookings
+             set status = $1, updated_at = now()${timestampColumn ? `, ${timestampColumn} = now()` : ''}
+                 ${owesMoney ? ', checkout_reason = $3, checked_out_by = $4' : ''}
+             where id = $2
+             returning id, status, actual_check_in_at, actual_check_out_at, updated_at,
+                       checkout_reason, checked_out_by, checkout_reviewed_by, checkout_reviewed_at`,
+            owesMoney ? [transition.to, id, reason.trim(), req.adminId] : [transition.to, id],
+          )
+          await client.query('COMMIT')
 
-        logAudit({
-          entityType: 'booking',
-          entityId: id,
-          action: 'status_change',
-          changes: { status: { old: previousStatus, new: transition.to } },
-          actor: req.adminId,
-        })
+          logAudit({
+            entityType: 'booking',
+            entityId: id,
+            action: 'status_change',
+            changes: {
+              status: { old: previousStatus, new: transition.to },
+              ...(owesMoney ? { checkoutReason: { old: null, new: reason.trim() } } : {}),
+            },
+            actor: req.adminId,
+            reason: owesMoney ? reason.trim() : undefined,
+          })
 
-        result = { status: 200, body: updated[0] }
+          result = { status: 200, body: updated[0] }
+        }
       }
     } catch (err) {
       await client.query('ROLLBACK')
@@ -516,6 +540,60 @@ router.patch('/bookings/:id', async (req, res, next) => {
     }
 
     res.status(result.status).json(result.body)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Every guest who left owing money, oldest-unreviewed-first — the "debtors"
+// list the super admin asked for, with who processed the checkout and why.
+// Super-admin-only, matching every other financial oversight route.
+router.get('/checkouts/owing', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `select b.id, b.booking_code, b.full_name, b.email, b.phone,
+              b.check_in, b.check_out, b.total_amount, b.amount_paid, b.balance,
+              b.checkout_reason, b.checked_out_by, b.checkout_reviewed_by, b.checkout_reviewed_at,
+              b.actual_check_out_at,
+              l.title as listing_title, l.city as listing_city, l.unit_code,
+              cb.display_name as checked_out_by_name,
+              rb.display_name as checkout_reviewed_by_name
+       from bookings b
+       join listings l on l.id = b.listing_id
+       left join admin_users cb on cb.id = b.checked_out_by
+       left join admin_users rb on rb.id = b.checkout_reviewed_by
+       where b.status = 'checked_out' and b.balance > 0
+       order by (b.checkout_reviewed_at is not null), b.actual_check_out_at desc`,
+    )
+    res.json(rows)
+  } catch (err) {
+    next(err)
+  }
+})
+
+router.patch('/bookings/:id/checkout-review', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params
+    const { rows } = await pool.query(
+      `update bookings
+       set checkout_reviewed_by = $1, checkout_reviewed_at = now()
+       where id = $2 and status = 'checked_out' and balance > 0
+       returning id, checkout_reviewed_by, checkout_reviewed_at`,
+      [req.adminId, id],
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'No unpaid checkout found for this booking.' })
+    }
+
+    logAudit({
+      entityType: 'booking',
+      entityId: id,
+      action: 'checkout_reviewed',
+      changes: { checkoutReviewedBy: { old: null, new: req.adminId } },
+      actor: req.adminId,
+    })
+
+    res.json(rows[0])
   } catch (err) {
     next(err)
   }

@@ -362,3 +362,12 @@ create index if not exists payments_booking_id_idx on payments (booking_id);
 -- amount_paid explicitly in the same transaction as the insert, inside a
 -- `select ... for update` — same optimistic-concurrency-safe pattern as the
 -- existing booking status transitions.
+
+-- Checkout-with-outstanding-balance accountability (2026-08-15): staff can
+-- still check a guest out when they owe money (the guest is physically
+-- leaving — the system shouldn't block that in real time), but must record
+-- why, and it surfaces to the super admin for review until acknowledged.
+alter table bookings add column if not exists checkout_reason text;
+alter table bookings add column if not exists checked_out_by text;
+alter table bookings add column if not exists checkout_reviewed_by text;
+alter table bookings add column if not exists checkout_reviewed_at timestamptz;
