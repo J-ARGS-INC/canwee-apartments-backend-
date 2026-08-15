@@ -152,6 +152,112 @@ export function bookingAdminNotificationEmail({
   `)
 }
 
+function bulletList(items) {
+  if (items.length === 0) {
+    return `<p style="margin:0 0 20px;font-size:13px;color:${COLORS.muted};">None.</p>`
+  }
+  const itemsHtml = items.map((item) => `<li style="margin:0 0 6px;font-size:13px;color:#334155;">${item}</li>`).join('')
+  return `<ul style="margin:0 0 20px;padding-left:18px;">${itemsHtml}</ul>`
+}
+
+function sectionHeading(text) {
+  return `<p style="margin:24px 0 8px;font-size:13px;font-weight:700;color:${COLORS.ink};">${escapeHtml(text)}</p>`
+}
+
+export function dailyDigestEmail({ dateLabel, checkInsToday, checkOutsToday, checkedInNow, upcoming48h, unpaidReserved, dashboardUrl }) {
+  const stayLine = (b) => `<strong>${escapeHtml(b.full_name)}</strong> &middot; ${escapeHtml(b.listing_title)} (${escapeHtml(b.unit_code || b.listing_city)}) &middot; <span style="font-family:monospace;">${escapeHtml(b.booking_code)}</span>`
+  const balanceLine = (b) => `${stayLine(b)} &middot; balance ${b.balance}`
+
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Daily operations digest</p>
+    <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(dateLabel)}</p>
+
+    ${sectionHeading(`Checking in today (${checkInsToday.length})`)}
+    ${bulletList(checkInsToday.map(stayLine))}
+
+    ${sectionHeading(`Checking out today (${checkOutsToday.length})`)}
+    ${bulletList(checkOutsToday.map(stayLine))}
+
+    ${sectionHeading(`Currently checked in (${checkedInNow.length})`)}
+    ${bulletList(checkedInNow.map(stayLine))}
+
+    ${sectionHeading(`Upcoming within 48 hours (${upcoming48h.length})`)}
+    ${bulletList(upcoming48h.map((b) => `${stayLine(b)} &middot; ${escapeHtml(b.kind)} ${escapeHtml(b.date)}`))}
+
+    ${sectionHeading(`Needs a payment follow-up (${unpaidReserved.length})`)}
+    ${bulletList(unpaidReserved.map(balanceLine))}
+
+    <p style="text-align:center;margin:24px 0 0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}
+
+export function weeklyDigestEmail({ weekLabel, report, checkInsCompleted, checkOutsCompleted, cancelledCount, noShowCount, dashboardUrl }) {
+  const topUnit = report.topListings[0]
+  const bottomUnit = report.bottomListings[0]
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Weekly operations summary</p>
+    <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(weekLabel)}</p>
+    ${summaryTable([
+      ['Total bookings', String(report.totalBookings)],
+      ['Revenue collected', `&#8358;${Math.round(report.totalCollected).toLocaleString('en-US')}`],
+      ['Outstanding balance', `&#8358;${Math.round(report.totalOutstanding).toLocaleString('en-US')}`],
+      ['Expenses recorded', `&#8358;${Math.round(report.totalExpenses).toLocaleString('en-US')}`],
+      ['Check-ins completed', String(checkInsCompleted)],
+      ['Check-outs completed', String(checkOutsCompleted)],
+      ['Cancelled', String(cancelledCount)],
+      ['No-shows', String(noShowCount)],
+      ...(topUnit ? [['Highest booked unit', `${escapeHtml(topUnit.title)} (${escapeHtml(topUnit.unitCode || topUnit.city)})`]] : []),
+      ...(bottomUnit ? [['Lowest activity unit', `${escapeHtml(bottomUnit.title)} (${escapeHtml(bottomUnit.unitCode || bottomUnit.city)})`]] : []),
+    ])}
+    <p style="text-align:center;margin:0;">
+      ${ctaButton(dashboardUrl, 'Open full dashboard')}
+    </p>
+  `)
+}
+
+export function monthlyReportEmail({ monthLabel, report, paymentStatusCounts, dashboardUrl }) {
+  const topUnit = report.topListings[0]
+  const bottomUnit = report.bottomListings[0]
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
+
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Monthly business report</p>
+    <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(monthLabel)}</p>
+    ${summaryTable([
+      ['Total bookings', String(report.totalBookings)],
+      ['Total revenue', money(report.totalRevenue)],
+      ['Total collected', money(report.totalCollected)],
+      ['Outstanding balance', money(report.totalOutstanding)],
+      ['Total expenses', money(report.totalExpenses)],
+      ['Net profit', money(report.netIncome)],
+      ...(topUnit ? [['Best-performing unit', `${escapeHtml(topUnit.title)} (${escapeHtml(topUnit.unitCode || topUnit.city)}) &mdash; ${money(topUnit.collected)}`]] : []),
+      ...(bottomUnit ? [['Least-performing unit', `${escapeHtml(bottomUnit.title)} (${escapeHtml(bottomUnit.unitCode || bottomUnit.city)}) &mdash; ${money(bottomUnit.collected)}`]] : []),
+    ])}
+
+    ${sectionHeading('Revenue by location')}
+    ${bulletList(report.byLocation.map((r) => `${escapeHtml(r.location)}: ${money(r.collected)}`))}
+
+    ${sectionHeading('Expenses by category')}
+    ${bulletList(report.expenseByCategory.map((r) => `${escapeHtml(r.category)}: ${money(r.amount)} (${r.percent.toFixed(0)}%)`))}
+
+    ${sectionHeading('Payment status')}
+    ${bulletList([
+      `Fully paid: ${paymentStatusCounts.paid || 0}`,
+      `Part payment: ${paymentStatusCounts.part_payment || 0}`,
+      `Unpaid: ${paymentStatusCounts.unpaid || 0}`,
+    ])}
+
+    ${sectionHeading('Booking outcomes')}
+    ${bulletList(report.byStatus.map((r) => `${escapeHtml(r.status.replace('_', ' '))}: ${r.bookings}`))}
+
+    <p style="text-align:center;margin:24px 0 0;">
+      ${ctaButton(dashboardUrl, 'Open full dashboard')}
+    </p>
+  `)
+}
+
 export function contactAdminNotificationEmail({ name, email, topic, message, receivedAt }) {
   return shell(`
     <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">New contact message</p>

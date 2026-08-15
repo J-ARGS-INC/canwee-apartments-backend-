@@ -107,6 +107,17 @@ create table if not exists idempotency_keys (
   created_at timestamptz not null default now()
 );
 
+-- Nullable (2026-08-15): the key row is now inserted as a placeholder the
+-- instant a request claims it (before the handler runs), then filled in
+-- once the response is known. This closes a real race the original
+-- "check-then-insert" version had — two truly concurrent requests (an
+-- actual double-tap, not a delayed retry) could both pass the "does this
+-- key exist" check before either finished writing, so both ran the
+-- handler. Claiming the row atomically via INSERT ... ON CONFLICT means
+-- only one request can ever win it; see middleware/idempotency.js.
+alter table idempotency_keys alter column status_code drop not null;
+alter table idempotency_keys alter column response drop not null;
+
 -- Property-management fields (2026-08-05) to match the operator's existing
 -- booking-tracking spreadsheet: a short unit identifier + human-readable
 -- booking codes (IKE-0001, ABE-0008, etc), plus payment/financial tracking
@@ -296,3 +307,58 @@ create table if not exists listing_videos (
 );
 
 create index if not exists listing_videos_listing_id_idx on listing_videos (listing_id, sort_order);
+
+-- Property-management expansion (2026-08-15): no_show status, a guest-facing
+-- settings store, and a payments log (multiple receipts per booking, not
+-- just the single amount_paid/payment_method pair on the booking row).
+
+alter table bookings drop constraint if exists bookings_status_check;
+alter table bookings add constraint bookings_status_check
+  check (status in ('pending', 'confirmed', 'checked_in', 'checked_out', 'cancelled', 'no_show'));
+
+-- A no-show never occupied the unit, so — same as cancelled — it must not
+-- block future overlapping bookings for that listing/date range.
+alter table bookings drop constraint if exists bookings_no_overlap;
+alter table bookings add constraint bookings_no_overlap
+  exclude using gist (listing_id with =, stay_range with &&)
+  where (status not in ('cancelled', 'no_show'));
+
+-- Simple key/value store for super-admin-editable operational config
+-- (notification recipients, WhatsApp alert number, expense categories,
+-- payment methods) that previously lived only as env vars or hardcoded
+-- frontend arrays. jsonb value keeps this generic across very different
+-- shapes (a string, a list, an object) without a table per setting.
+create table if not exists settings (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now(),
+  updated_by text
+);
+
+-- A running log of individual payments/receipts against a booking, distinct
+-- from bookings.amount_paid (which stays as the authoritative running total
+-- — see the trigger below). Lets the front desk record "guest paid ₦50,000
+-- by transfer on the 3rd, then another ₦30,000 cash on arrival" as two
+-- traceable entries instead of one admin overwriting amount_paid twice with
+-- no record of the individual receipts.
+create table if not exists payments (
+  id uuid primary key default gen_random_uuid(),
+  booking_id uuid not null references bookings(id) on delete cascade,
+  amount numeric not null check (amount > 0),
+  payment_method text,
+  payment_date date not null default current_date,
+  received_by text,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists payments_booking_id_idx on payments (booking_id);
+
+-- Deliberately no trigger recomputing bookings.amount_paid from this table:
+-- the existing PATCH .../details path (FINANCE_FIELDS) already lets an
+-- admin set amount_paid directly for corrections, and a trigger fighting
+-- that same column would make the two paths silently overwrite each other.
+-- Instead POST /admin/bookings/:id/payments (adminPayments.js) increments
+-- amount_paid explicitly in the same transaction as the insert, inside a
+-- `select ... for update` — same optimistic-concurrency-safe pattern as the
+-- existing booking status transitions.

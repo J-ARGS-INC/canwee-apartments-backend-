@@ -4,6 +4,7 @@ import { requireAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
 import { maxLength } from '../lib/validate.js'
+import { idempotent } from '../middleware/idempotency.js'
 
 const EXPENSE_FIELDS = {
   expenseDate: 'expense_date',
@@ -50,7 +51,10 @@ router.get('/', async (req, res, next) => {
   }
 })
 
-router.post('/', async (req, res, next) => {
+// See adminPayments.js for why idempotent() matters specifically on a
+// money-creating POST: a double-tap or retried request must replay the
+// first response, not log the expense twice.
+router.post('/', idempotent(), async (req, res, next) => {
   try {
     const { expenseDate, category, description, amount, listingId, paidTo, loggedBy, notes } = req.body ?? {}
 

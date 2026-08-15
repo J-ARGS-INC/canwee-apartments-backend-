@@ -78,6 +78,7 @@ const TRANSITIONS = {
   'check-in': { from: ['confirmed', 'pending'], to: 'checked_in' },
   'check-out': { from: ['checked_in'], to: 'checked_out' },
   cancel: { from: ['pending', 'confirmed'], to: 'cancelled' },
+  'no-show': { from: ['pending', 'confirmed'], to: 'no_show' },
 }
 
 const BOOKING_SELECT = `
@@ -150,13 +151,40 @@ router.get('/verify', (req, res) => {
 
 router.get('/bookings', async (req, res, next) => {
   try {
-    const { status } = req.query
+    const { status, paymentStatus, listingId, guestQuery, startDate, endDate } = req.query
     const params = []
-    let where = ''
+    const conditions = []
+
     if (status && typeof status === 'string') {
       params.push(status)
-      where = 'where b.status = $1'
+      conditions.push(`b.status = $${params.length}`)
     }
+    if (paymentStatus && typeof paymentStatus === 'string') {
+      params.push(paymentStatus)
+      conditions.push(`b.payment_status = $${params.length}`)
+    }
+    if (listingId && typeof listingId === 'string') {
+      params.push(listingId)
+      conditions.push(`b.listing_id = $${params.length}`)
+    }
+    // Matches guest name, phone, email, or booking code in one box — front
+    // desk staff typically have just one of these on hand at a time.
+    if (guestQuery && typeof guestQuery === 'string' && guestQuery.trim()) {
+      params.push(`%${guestQuery.trim()}%`)
+      conditions.push(
+        `(b.full_name ilike $${params.length} or b.phone ilike $${params.length} or b.email ilike $${params.length} or b.booking_code ilike $${params.length})`,
+      )
+    }
+    if (isValidDate(startDate)) {
+      params.push(startDate)
+      conditions.push(`b.check_in >= $${params.length}`)
+    }
+    if (isValidDate(endDate)) {
+      params.push(endDate)
+      conditions.push(`b.check_in <= $${params.length}`)
+    }
+
+    const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
 
     // Paginated so the list stays fast and manageable as bookings pile up
     // over time — newest first, older ones only loaded on request (the

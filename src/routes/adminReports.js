@@ -1,15 +1,21 @@
 import { Router } from 'express'
 import ExcelJS from 'exceljs'
+import PDFDocument from 'pdfkit'
 import { pool } from '../db.js'
-import { requireAdmin } from '../middleware/adminAuth.js'
+import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
+import { buildSummaryReport } from '../lib/reports.js'
 
 const router = Router()
 
 router.use(requireAdmin)
 router.use(adminLimiter)
 
-router.get('/audit-log', async (req, res, next) => {
+// Financial/audit visibility is super-admin-only per the access-control
+// spec — staff get operational routes (availability) but not money or the
+// audit trail. /availability deliberately stays on plain requireAdmin
+// since staff need it for day-to-day check-in/check-out work.
+router.get('/audit-log', requireSuperAdmin, async (req, res, next) => {
   try {
     const { entityType, entityId } = req.query
     const conditions = []
@@ -35,71 +41,78 @@ router.get('/audit-log', async (req, res, next) => {
   }
 })
 
-router.get('/reports/summary', async (req, res, next) => {
+router.get('/reports/summary', requireSuperAdmin, async (req, res, next) => {
   try {
-    const { rows: totals } = await pool.query(`
-      select
-        coalesce(sum(total_amount), 0) as total_revenue,
-        coalesce(sum(amount_paid), 0) as total_collected,
-        coalesce(sum(balance), 0) as total_outstanding,
-        count(*) filter (where status != 'cancelled') as active_bookings
-      from bookings
-    `)
+    const { startDate, endDate } = req.query
+    res.json(await buildSummaryReport({ startDate, endDate }))
+  } catch (err) {
+    next(err)
+  }
+})
 
-    const { rows: byLocation } = await pool.query(`
-      select l.city as location,
-             coalesce(sum(b.total_amount), 0) as revenue,
-             coalesce(sum(b.amount_paid), 0) as collected,
-             count(*) as bookings
-      from bookings b
-      join listings l on l.id = b.listing_id
-      where b.status != 'cancelled'
-      group by l.city
-      order by l.city
-    `)
+function formatMoney(amount) {
+  return `NGN ${Math.round(amount).toLocaleString('en-US')}`
+}
 
-    const { rows: byPaymentMethod } = await pool.query(`
-      select coalesce(payment_method, 'Unspecified') as payment_method,
-             coalesce(sum(amount_paid), 0) as collected,
-             count(*) as bookings
-      from bookings
-      where amount_paid > 0
-      group by payment_method
-      order by collected desc
-    `)
+router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query
+    const report = await buildSummaryReport({ startDate, endDate })
 
-    const { rows: bySource } = await pool.query(`
-      select coalesce(source_channel, 'Unspecified') as source_channel, count(*) as bookings
-      from bookings
-      where status != 'cancelled'
-      group by source_channel
-      order by bookings desc
-    `)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="canwee-summary-${new Date().toISOString().slice(0, 10)}.pdf"`)
 
-    const { rows: expenseTotal } = await pool.query(
-      'select coalesce(sum(amount), 0) as total_expenses from expenses where deleted_at is null',
-    )
+    const doc = new PDFDocument({ margin: 50, size: 'A4' })
+    doc.pipe(res)
 
-    res.json({
-      totalRevenue: Number(totals[0].total_revenue),
-      totalCollected: Number(totals[0].total_collected),
-      totalOutstanding: Number(totals[0].total_outstanding),
-      activeBookings: Number(totals[0].active_bookings),
-      totalExpenses: Number(expenseTotal[0].total_expenses),
-      netIncome: Number(totals[0].total_collected) - Number(expenseTotal[0].total_expenses),
-      byLocation: byLocation.map((r) => ({
-        location: r.location,
-        revenue: Number(r.revenue),
-        collected: Number(r.collected),
-        bookings: Number(r.bookings),
-      })),
-      byPaymentMethod: byPaymentMethod.map((r) => ({
-        paymentMethod: r.payment_method,
-        collected: Number(r.collected),
-        bookings: Number(r.bookings),
-      })),
-      bySource: bySource.map((r) => ({ sourceChannel: r.source_channel, bookings: Number(r.bookings) })),
-    })
+    doc.fontSize(18).font('Helvetica-Bold').text('Canwee Apartments — Payment Summary')
+    const periodLabel = startDate || endDate ? `${startDate || 'inception'} to ${endDate || 'today'}` : 'All time'
+    doc.fontSize(10).font('Helvetica').fillColor('#666').text(`Period: ${periodLabel}  ·  Generated ${new Date().toLocaleString('en-US')}`)
+    doc.moveDown(1)
+
+    function statRow(pairs) {
+      doc.fontSize(10).fillColor('#000')
+      const colWidth = (doc.page.width - 100) / pairs.length
+      const y = doc.y
+      pairs.forEach(([label, value], i) => {
+        doc.font('Helvetica').fillColor('#666').text(label, 50 + i * colWidth, y, { width: colWidth - 10 })
+        doc.font('Helvetica-Bold').fillColor('#000').text(value, 50 + i * colWidth, y + 14, { width: colWidth - 10 })
+      })
+      doc.y = y + 34
+    }
+
+    statRow([
+      ['Total revenue', formatMoney(report.totalRevenue)],
+      ['Collected', formatMoney(report.totalCollected)],
+      ['Outstanding', formatMoney(report.totalOutstanding)],
+    ])
+    statRow([
+      ['Expenses', formatMoney(report.totalExpenses)],
+      ['Net income', formatMoney(report.netIncome)],
+      ['Bookings', `${report.activeBookings} active / ${report.totalBookings} total`],
+    ])
+
+    function section(title, rows, columns) {
+      doc.moveDown(0.5)
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#000').text(title)
+      doc.moveDown(0.2)
+      if (rows.length === 0) {
+        doc.fontSize(9).font('Helvetica').fillColor('#999').text('No data for this period.')
+        return
+      }
+      doc.fontSize(9).font('Helvetica')
+      for (const row of rows) {
+        doc.fillColor('#333').text(`${columns.label(row)}  —  ${columns.value(row)}`)
+      }
+    }
+
+    section('Revenue by location', report.byLocation, { label: (r) => r.location, value: (r) => formatMoney(r.collected) })
+    section('Collected by payment method', report.byPaymentMethod, { label: (r) => r.paymentMethod, value: (r) => formatMoney(r.collected) })
+    section('Bookings by status', report.byStatus, { label: (r) => r.status.replace('_', ' '), value: (r) => String(r.bookings) })
+    section('Top performing units', report.topListings, { label: (r) => `${r.title}${r.unitCode ? ` (${r.unitCode})` : ''}`, value: (r) => formatMoney(r.collected) })
+    section('Expenses by category', report.expenseByCategory, { label: (r) => r.category, value: (r) => `${formatMoney(r.amount)} (${r.percent.toFixed(0)}%)` })
+
+    doc.end()
   } catch (err) {
     next(err)
   }
@@ -113,7 +126,7 @@ router.get('/availability', async (req, res, next) => {
     const { rows: bookingRows } = await pool.query(`
       select listing_id, check_in, check_out, status, full_name
       from bookings
-      where status not in ('cancelled') and check_out >= current_date
+      where status not in ('cancelled', 'no_show') and check_out >= current_date
       order by check_in
     `)
 
@@ -142,7 +155,7 @@ router.get('/availability', async (req, res, next) => {
   }
 })
 
-router.get('/export/workbook.xlsx', async (req, res, next) => {
+router.get('/export/workbook.xlsx', requireSuperAdmin, async (req, res, next) => {
   try {
     const workbook = new ExcelJS.Workbook()
     workbook.creator = 'Canwee Apartments'
