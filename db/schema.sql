@@ -371,3 +371,26 @@ alter table bookings add column if not exists checkout_reason text;
 alter table bookings add column if not exists checked_out_by text;
 alter table bookings add column if not exists checkout_reviewed_by text;
 alter table bookings add column if not exists checkout_reviewed_at timestamptz;
+
+-- Expense IDs (2026-08-18), mirroring booking_code: every expense now gets a
+-- stable, human-readable reference (EXP-0001, EXP-0002, ...) instead of only
+-- the opaque uuid, so the operator can trace an entry back to a receipt or
+-- spreadsheet row the same way they already do with booking codes. Starts
+-- at 48 to continue past the 47 entries backfilled from the operator's
+-- existing expense spreadsheet (EXP-0001..EXP-0047).
+create sequence if not exists expense_code_seq start 48;
+
+alter table expenses add column if not exists expense_code text unique;
+
+create or replace function set_expense_code() returns trigger as $$
+begin
+  if new.expense_code is null then
+    new.expense_code := 'EXP-' || lpad(nextval('expense_code_seq')::text, 4, '0');
+  end if;
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_set_expense_code on expenses;
+create trigger trg_set_expense_code before insert on expenses
+  for each row execute function set_expense_code();

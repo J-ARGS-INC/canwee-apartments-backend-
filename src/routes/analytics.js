@@ -62,7 +62,7 @@ router.get('/summary', async (req, res, next) => {
       select l.id, l.title, l.city, l.unit_code,
         exists (
           select 1 from bookings b
-          where b.listing_id = l.id and b.status not in ('cancelled')
+          where b.listing_id = l.id and b.status not in ('cancelled', 'no_show')
             and b.check_in <= current_date and b.check_out > current_date
         ) as occupied
       from listings l

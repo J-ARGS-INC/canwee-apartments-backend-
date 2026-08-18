@@ -209,6 +209,7 @@ router.get('/export/workbook.xlsx', requireSuperAdmin, async (req, res, next) =>
 
     const expensesSheet = workbook.addWorksheet('Expenses')
     expensesSheet.columns = [
+      { header: 'Expense Code', key: 'expense_code', width: 14 },
       { header: 'Date', key: 'expense_date', width: 14 },
       { header: 'Category', key: 'category', width: 18 },
       { header: 'Description', key: 'description', width: 30 },
@@ -221,7 +222,7 @@ router.get('/export/workbook.xlsx', requireSuperAdmin, async (req, res, next) =>
     expensesSheet.getRow(1).font = { bold: true }
 
     const { rows: expenses } = await pool.query(`
-      select e.expense_date, e.category, e.description, e.amount, l.title as listing_title,
+      select e.expense_code, e.expense_date, e.category, e.description, e.amount, l.title as listing_title,
              e.paid_to, e.logged_by, e.notes
       from expenses e
       left join listings l on l.id = e.listing_id

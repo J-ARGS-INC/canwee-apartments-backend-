@@ -36,7 +36,7 @@ router.get('/', async (req, res, next) => {
     const totalAmount = Number(countRows[0].total_amount)
 
     const { rows } = await pool.query(
-      `select e.id, e.expense_date, e.category, e.description, e.amount, e.listing_id,
+      `select e.id, e.expense_code, e.expense_date, e.category, e.description, e.amount, e.listing_id,
               e.paid_to, e.logged_by, e.notes, e.created_at, e.updated_at, l.title as listing_title
        from expenses e
        left join listings l on l.id = e.listing_id
@@ -74,7 +74,7 @@ router.post('/', idempotent(), async (req, res, next) => {
 
     const { rows } = await pool.query(
       `insert into expenses (expense_date, category, description, amount, listing_id, paid_to, logged_by, notes)
-       values ($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
+       values ($1,$2,$3,$4,$5,$6,$7,$8) returning id, expense_code`,
       [
         expenseDate || new Date().toISOString().slice(0, 10),
         category,
@@ -95,7 +95,7 @@ router.post('/', idempotent(), async (req, res, next) => {
       actor: req.adminId,
     })
 
-    res.status(201).json({ id: rows[0].id })
+    res.status(201).json({ id: rows[0].id, expenseCode: rows[0].expense_code })
   } catch (err) {
     next(err)
   }

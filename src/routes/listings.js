@@ -171,9 +171,11 @@ router.get('/:id', async (req, res, next) => {
 // already taken before submitting a request — deliberately returns only
 // date ranges, never who booked them or their payment/contact details
 // (unlike the admin availability endpoint, which is behind auth and does
-// include guest names). A booking's dates stop blocking the calendar the
-// moment its check-out date passes, whatever the booking's status is —
-// the [checkIn, checkOut) range itself is what's reserved, not the status.
+// include guest names). Excludes cancelled and no_show the same way the
+// admin endpoint and the bookings_no_overlap DB constraint do — neither
+// ever actually occupied the unit, so they must not block the calendar.
+// Every other booking's dates stop blocking the moment its check-out date
+// passes — the [checkIn, checkOut) range itself is what's reserved.
 router.get('/:id/availability', async (req, res, next) => {
   try {
     const { rows: listingRows } = await pool.query('select id from listings where id = $1', [req.params.id])
@@ -182,7 +184,7 @@ router.get('/:id/availability', async (req, res, next) => {
     const { rows } = await pool.query(
       `select check_in, check_out
        from bookings
-       where listing_id = $1 and status not in ('cancelled') and check_out >= current_date
+       where listing_id = $1 and status not in ('cancelled', 'no_show') and check_out >= current_date
        order by check_in`,
       [req.params.id],
     )
