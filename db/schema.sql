@@ -394,3 +394,9 @@ $$ language plpgsql;
 drop trigger if exists trg_set_expense_code on expenses;
 create trigger trg_set_expense_code before insert on expenses
   for each row execute function set_expense_code();
+
+-- Paid by (2026-08-20): the authenticated admin who logged the expense,
+-- set server-side from req.adminId on create — never client-supplied,
+-- unlike the pre-existing free-text `logged_by` field. Plain text
+-- referencing admin_users.id by convention, same as bookings.checked_out_by.
+alter table expenses add column if not exists paid_by text;

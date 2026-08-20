@@ -43,8 +43,8 @@ router.get('/audit-log', requireSuperAdmin, async (req, res, next) => {
 
 router.get('/reports/summary', requireSuperAdmin, async (req, res, next) => {
   try {
-    const { startDate, endDate } = req.query
-    res.json(await buildSummaryReport({ startDate, endDate }))
+    const { startDate, endDate, location } = req.query
+    res.json(await buildSummaryReport({ startDate, endDate, location }))
   } catch (err) {
     next(err)
   }
@@ -54,10 +54,12 @@ function formatMoney(amount) {
   return `NGN ${Math.round(amount).toLocaleString('en-US')}`
 }
 
+const LOCATION_PDF_LABEL = { ikeja: 'Ikeja', gbagada: 'Gbagada', abeokuta: 'Abeokuta' }
+
 router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
   try {
-    const { startDate, endDate } = req.query
-    const report = await buildSummaryReport({ startDate, endDate })
+    const { startDate, endDate, location } = req.query
+    const report = await buildSummaryReport({ startDate, endDate, location })
 
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="canwee-summary-${new Date().toISOString().slice(0, 10)}.pdf"`)
@@ -67,7 +69,12 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
 
     doc.fontSize(18).font('Helvetica-Bold').text('Canwee Apartments — Payment Summary')
     const periodLabel = startDate || endDate ? `${startDate || 'inception'} to ${endDate || 'today'}` : 'All time'
-    doc.fontSize(10).font('Helvetica').fillColor('#666').text(`Period: ${periodLabel}  ·  Generated ${new Date().toLocaleString('en-US')}`)
+    const locationLabel = report.location ? LOCATION_PDF_LABEL[report.location] || report.location : 'All locations'
+    doc
+      .fontSize(10)
+      .font('Helvetica')
+      .fillColor('#666')
+      .text(`Period: ${periodLabel}  ·  Location: ${locationLabel}  ·  Generated ${new Date().toLocaleString('en-US')}`)
     doc.moveDown(1)
 
     function statRow(pairs) {
@@ -107,6 +114,13 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
     }
 
     section('Revenue by location', report.byLocation, { label: (r) => r.location, value: (r) => formatMoney(r.collected) })
+    section('Bookings by location', report.byLocation, { label: (r) => r.location, value: (r) => String(r.bookings) })
+    section('Expenses by location', report.expenseByLocation, { label: (r) => r.location, value: (r) => formatMoney(r.amount) })
+    section('Net profit by location', report.netProfitByLocation, { label: (r) => r.location, value: (r) => formatMoney(r.netProfit) })
+    section('Bookings by source & location', report.bySourceByLocation, {
+      label: (r) => `${r.location} — ${r.sourceChannel}`,
+      value: (r) => String(r.bookings),
+    })
     section('Collected by payment method', report.byPaymentMethod, { label: (r) => r.paymentMethod, value: (r) => formatMoney(r.collected) })
     section('Bookings by status', report.byStatus, { label: (r) => r.status.replace('_', ' '), value: (r) => String(r.bookings) })
     section('Top performing units', report.topListings, { label: (r) => `${r.title}${r.unitCode ? ` (${r.unitCode})` : ''}`, value: (r) => formatMoney(r.collected) })

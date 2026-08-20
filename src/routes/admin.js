@@ -73,13 +73,20 @@ function validatePaymentConsistency({ paymentStatus, amountPaid, totalAmount }, 
 
 const router = Router()
 
-const TRANSITIONS = {
-  confirm: { from: ['pending'], to: 'confirmed' },
-  'check-in': { from: ['confirmed', 'pending'], to: 'checked_in' },
-  'check-out': { from: ['checked_in'], to: 'checked_out' },
-  cancel: { from: ['pending', 'confirmed'], to: 'cancelled' },
-  'no-show': { from: ['pending', 'confirmed'], to: 'no_show' },
-}
+// A Map, not a plain object — `action` is client-supplied request input,
+// and plain-object bracket lookup resolves inherited keys like
+// "__proto__"/"constructor" to a truthy prototype-chain object instead of
+// undefined, which would slip past the `!transition` guard below and then
+// throw reading `.from` on it. A Map has no prototype chain to fall
+// through, so an unrecognized action always misses cleanly. Same class of
+// bug as the location filter fix elsewhere in this codebase.
+const TRANSITIONS = new Map([
+  ['confirm', { from: ['pending'], to: 'confirmed' }],
+  ['check-in', { from: ['confirmed', 'pending'], to: 'checked_in' }],
+  ['check-out', { from: ['checked_in'], to: 'checked_out' }],
+  ['cancel', { from: ['pending', 'confirmed'], to: 'cancelled' }],
+  ['no-show', { from: ['pending', 'confirmed'], to: 'no_show' }],
+])
 
 const BOOKING_SELECT = `
   select b.id, b.booking_code, b.booking_date, b.listing_id, b.full_name, b.email, b.phone,
@@ -419,7 +426,10 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
 
     const { rows: full } = await pool.query(`${BOOKING_SELECT} where b.id = $1`, [id])
 
-    const changedKeys = Object.keys(body).filter((key) => key in FINANCE_FIELDS)
+    // hasOwnProperty, not `in` — `in` also matches inherited keys like
+    // "toString"/"constructor"/"__proto__", which a crafted body could send
+    // as an own key to smuggle one into this (audit-log-only) diff.
+    const changedKeys = Object.keys(body).filter((key) => Object.prototype.hasOwnProperty.call(FINANCE_FIELDS, key))
     const beforeCamel = {}
     const afterCamel = {}
     for (const key of changedKeys) {
@@ -447,7 +457,7 @@ router.patch('/bookings/:id', async (req, res, next) => {
     const { id } = req.params
     const { action, reason } = req.body ?? {}
 
-    const transition = TRANSITIONS[action]
+    const transition = typeof action === 'string' ? TRANSITIONS.get(action) : undefined
     if (!transition) {
       return res.status(400).json({ error: `Unknown action "${action}".` })
     }

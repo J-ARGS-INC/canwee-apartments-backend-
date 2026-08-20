@@ -3,8 +3,9 @@ import { pool } from '../db.js'
 import { requireAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
-import { maxLength } from '../lib/validate.js'
+import { maxLength, isValidDate } from '../lib/validate.js'
 import { idempotent } from '../middleware/idempotency.js'
+import { locationCondition } from '../lib/location.js'
 
 const EXPENSE_FIELDS = {
   expenseDate: 'expense_date',
@@ -28,22 +29,47 @@ router.get('/', async (req, res, next) => {
     // entries loaded on request via "Load more" instead of all at once.
     const limitNum = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
     const offsetNum = Math.max(0, Number(req.query.offset) || 0)
+    const { startDate, endDate, location } = req.query
+
+    // Every query below left-joins listings (an expense's listing_id is
+    // nullable — "General" expenses have no location) and shares the same
+    // condition set, so the count/total and the page of rows always agree.
+    const params = []
+    const conditions = ['e.deleted_at is null']
+    if (isValidDate(startDate)) {
+      params.push(startDate)
+      conditions.push(`e.expense_date >= $${params.length}`)
+    }
+    if (isValidDate(endDate)) {
+      params.push(endDate)
+      conditions.push(`e.expense_date <= $${params.length}`)
+    }
+    const locCond = locationCondition(location, params, 'l')
+    if (locCond) conditions.push(locCond)
+    const where = `where ${conditions.join(' and ')}`
 
     const { rows: countRows } = await pool.query(
-      "select count(*), coalesce(sum(amount), 0) as total_amount from expenses where deleted_at is null",
+      `select count(*), coalesce(sum(e.amount), 0) as total_amount
+       from expenses e
+       left join listings l on l.id = e.listing_id
+       ${where}`,
+      params,
     )
     const total = Number(countRows[0].count)
     const totalAmount = Number(countRows[0].total_amount)
 
     const { rows } = await pool.query(
       `select e.id, e.expense_code, e.expense_date, e.category, e.description, e.amount, e.listing_id,
-              e.paid_to, e.logged_by, e.notes, e.created_at, e.updated_at, l.title as listing_title
+              e.paid_to, e.logged_by, e.paid_by, pb.display_name as paid_by_name,
+              e.notes, e.created_at, e.updated_at, l.title as listing_title, l.city as listing_city,
+              l.neighborhood as listing_neighborhood
        from expenses e
        left join listings l on l.id = e.listing_id
-       where e.deleted_at is null
+       left join admin_users pb on pb.id = e.paid_by
+       ${where}
        order by e.expense_date desc, e.created_at desc
-       limit $1 offset $2`,
-      [limitNum, offsetNum],
+       limit $${params.length + 1} offset $${params.length + 2}`,
+      [...params, limitNum, offsetNum],
     )
     res.json({ expenses: rows, total, totalAmount })
   } catch (err) {
@@ -73,8 +99,8 @@ router.post('/', idempotent(), async (req, res, next) => {
     }
 
     const { rows } = await pool.query(
-      `insert into expenses (expense_date, category, description, amount, listing_id, paid_to, logged_by, notes)
-       values ($1,$2,$3,$4,$5,$6,$7,$8) returning id, expense_code`,
+      `insert into expenses (expense_date, category, description, amount, listing_id, paid_to, logged_by, notes, paid_by)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id, expense_code`,
       [
         expenseDate || new Date().toISOString().slice(0, 10),
         category,
@@ -84,6 +110,11 @@ router.post('/', idempotent(), async (req, res, next) => {
         paidTo || null,
         loggedBy || null,
         notes || null,
+        // Set from the authenticated admin, never from the request body —
+        // this is "who logged it", distinct from the free-text loggedBy
+        // field the user can type (e.g. a staff name that isn't an admin
+        // account).
+        req.adminId,
       ],
     )
 
@@ -170,7 +201,10 @@ router.patch('/:id', async (req, res, next) => {
       })
     }
 
-    const changedKeys = Object.keys(body).filter((key) => key in EXPENSE_FIELDS)
+    // hasOwnProperty, not `in` — `in` also matches inherited keys like
+    // "toString"/"constructor"/"__proto__", which a crafted body could send
+    // as an own key to smuggle one into this (audit-log-only) diff.
+    const changedKeys = Object.keys(body).filter((key) => Object.prototype.hasOwnProperty.call(EXPENSE_FIELDS, key))
     const beforeCamel = {}
     const afterCamel = {}
     for (const key of changedKeys) {
