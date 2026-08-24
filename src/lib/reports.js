@@ -104,6 +104,19 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
     bookingParams,
   )
 
+  const { rows: byAgent } = await pool.query(
+    `select a.id as agent_id, a.name as agent_name, a.phone as agent_phone,
+           count(*) as bookings,
+           coalesce(sum(b.amount_paid), 0) as collected
+    from bookings b
+    join listings l on l.id = b.listing_id
+    join agents a on a.id = b.agent_id
+    where b.status != 'cancelled' ${bookingWhereAnd}
+    group by a.id, a.name, a.phone
+    order by collected desc`,
+    bookingParams,
+  )
+
   const { rows: byStatus } = await pool.query(
     `select b.status, count(*) as bookings
     from bookings b
@@ -267,6 +280,13 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
       location: r.location,
       sourceChannel: r.source_channel,
       bookings: Number(r.bookings),
+    })),
+    byAgent: byAgent.map((r) => ({
+      agentId: r.agent_id,
+      agentName: r.agent_name,
+      agentPhone: r.agent_phone,
+      bookings: Number(r.bookings),
+      collected: Number(r.collected),
     })),
     byStatus: byStatus.map((r) => ({ status: r.status, bookings: Number(r.bookings) })),
     byPaymentStatus: byPaymentStatus.map((r) => ({ paymentStatus: r.payment_status, bookings: Number(r.bookings) })),

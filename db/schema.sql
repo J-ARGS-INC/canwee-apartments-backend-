@@ -85,9 +85,12 @@ alter table bookings add column if not exists actual_check_in_at timestamptz;
 alter table bookings add column if not exists actual_check_out_at timestamptz;
 alter table bookings add column if not exists updated_at timestamptz not null default now();
 
-alter table bookings drop constraint if exists bookings_status_check;
-alter table bookings add constraint bookings_status_check
-  check (status in ('pending', 'confirmed', 'checked_in', 'checked_out', 'cancelled'));
+-- (No bookings_status_check here — superseded by the version further down
+-- that also allows 'no_show'; a rerun-the-whole-file idempotent migration
+-- must never define the same constraint twice with two different value
+-- sets, since re-running against a DB that already has real rows using the
+-- later, wider set would fail the first, narrower one before ever reaching
+-- the correct definition.)
 
 -- Guest email is required for the public booking form (guests need the
 -- confirmation email), but admin-entered offline bookings (WhatsApp,
@@ -400,3 +403,35 @@ create trigger trg_set_expense_code before insert on expenses
 -- unlike the pre-existing free-text `logged_by` field. Plain text
 -- referencing admin_users.id by convention, same as bookings.checked_out_by.
 alter table expenses add column if not exists paid_by text;
+
+-- Agent directory (2026-08-24): sales agents who bring in bookings get a
+-- proper record here (id, name, phone) instead of a free-text field, so
+-- spelling variations/typos can never fragment one real agent's numbers
+-- across multiple rows in analytics. Independent of source_channel — one
+-- answers "how did this booking come in" (WhatsApp/Instagram/walk-in/...),
+-- the other "which specific agent, if any, gets credit for it."
+create table if not exists agents (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  phone text,
+  created_at timestamptz not null default now()
+);
+
+-- Partial (phone is optional) — stops the exact duplicate-entry problem
+-- this table exists to solve from creeping back in at data-entry time.
+create unique index if not exists agents_phone_unique_idx
+  on agents (phone) where phone is not null and phone <> '';
+
+alter table bookings add column if not exists agent_id uuid references agents(id);
+create index if not exists bookings_agent_id_idx on bookings (agent_id);
+
+-- Payment receipts (2026-08-24): optional evidence attached when an admin
+-- logs a payment, for fraud prevention — a super admin can later inspect it
+-- to confirm a logged payment is backed by a real receipt, not fabricated.
+-- bytea in Postgres, never a static file or third-party object store, same
+-- rule as listing_images/listing_videos. Deliberately NOT an input to
+-- payment_status/derivePaymentStatus in adminPayments.js — that math is
+-- untouched and still runs off amount alone; the receipt is supporting
+-- evidence attached after the fact, not a determinant of it.
+alter table payments add column if not exists receipt_content_type text;
+alter table payments add column if not exists receipt_data bytea;

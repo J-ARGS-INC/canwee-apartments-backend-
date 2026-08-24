@@ -121,6 +121,10 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
       label: (r) => `${r.location} — ${r.sourceChannel}`,
       value: (r) => String(r.bookings),
     })
+    section('Bookings by agent', report.byAgent, {
+      label: (r) => `${r.agentName}${r.agentPhone ? ` (${r.agentPhone})` : ''}`,
+      value: (r) => `${r.bookings} · ${formatMoney(r.collected)}`,
+    })
     section('Collected by payment method', report.byPaymentMethod, { label: (r) => r.paymentMethod, value: (r) => formatMoney(r.collected) })
     section('Bookings by status', report.byStatus, { label: (r) => r.status.replace('_', ' '), value: (r) => String(r.bookings) })
     section('Top performing units', report.topListings, { label: (r) => `${r.title}${r.unitCode ? ` (${r.unitCode})` : ''}`, value: (r) => formatMoney(r.collected) })

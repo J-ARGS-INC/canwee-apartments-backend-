@@ -93,11 +93,13 @@ const BOOKING_SELECT = `
          b.check_in, b.check_out, b.guests, b.notes, b.status,
          b.rate_per_night, b.discount, b.total_amount, b.amount_paid, b.balance,
          b.payment_status, b.payment_method, b.payment_date, b.source_channel, b.received_by,
+         b.agent_id, ag.name as agent_name, ag.phone as agent_phone,
          b.actual_check_in_at, b.actual_check_out_at, b.created_at, b.updated_at,
          b.checkout_reason, b.checked_out_by, b.checkout_reviewed_by, b.checkout_reviewed_at,
          l.title as listing_title, l.city as listing_city, l.unit_code, l.bedrooms
   from bookings b
   join listings l on l.id = b.listing_id
+  left join agents ag on ag.id = b.agent_id
 `
 
 // Whitelisted camelCase -> column name so PATCH bodies can never target an
@@ -114,6 +116,7 @@ const FINANCE_FIELDS = {
   paymentDate: 'payment_date',
   sourceChannel: 'source_channel',
   receivedBy: 'received_by',
+  agentId: 'agent_id',
   notes: 'notes',
   fullName: 'full_name',
   phone: 'phone',
@@ -245,7 +248,7 @@ router.post('/bookings', async (req, res, next) => {
     const {
       listingId, fullName, email, phone, checkIn, checkOut, guests, notes,
       status, bookingDate, ratePerNight, discount, totalAmount, amountPaid,
-      paymentStatus, paymentMethod, paymentDate, sourceChannel, receivedBy,
+      paymentStatus, paymentMethod, paymentDate, sourceChannel, receivedBy, agentId,
     } = req.body ?? {}
 
     const errors = {}
@@ -275,6 +278,13 @@ router.post('/bookings', async (req, res, next) => {
       return res.status(404).json({ error: 'Listing not found' })
     }
 
+    if (agentId != null) {
+      const { rows: agentRows } = await pool.query('select id from agents where id = $1', [agentId])
+      if (agentRows.length === 0) {
+        return res.status(404).json({ error: 'Agent not found' })
+      }
+    }
+
     const guestCount = Number(guests) || 1
     const rate = ratePerNight != null ? Number(ratePerNight) : listingRows[0].price_per_night
     const nights = Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)))
@@ -282,6 +292,10 @@ router.post('/bookings', async (req, res, next) => {
     const total = totalAmount != null ? Number(totalAmount) : nights * rate - discountAmount
     const paidAmount = amountPaid != null ? Number(amountPaid) : 0
     const paymentStatusValue = paymentStatus || 'unpaid'
+    // A sensible default for staff who pick an agent but leave the channel
+    // blank, without ever overwriting a channel they did specify — an agent
+    // can still reach out over WhatsApp, so the two aren't always the same.
+    const sourceChannelValue = sourceChannel || (agentId ? 'Agent' : null)
 
     const paymentErrors = {}
     validatePaymentConsistency({ paymentStatus: paymentStatusValue, amountPaid: paidAmount, totalAmount: total }, paymentErrors)
@@ -293,15 +307,15 @@ router.post('/bookings', async (req, res, next) => {
       `insert into bookings (
         listing_id, full_name, email, phone, check_in, check_out, guests, notes, status,
         booking_date, rate_per_night, discount, total_amount, amount_paid,
-        payment_status, payment_method, payment_date, source_channel, received_by
-      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        payment_status, payment_method, payment_date, source_channel, received_by, agent_id
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
       returning id, booking_code, status`,
       [
         listingId, fullName, email || null, phone, checkIn, checkOut, guestCount, notes || null,
         status || 'pending', bookingDate || new Date().toISOString().slice(0, 10), rate,
         discountAmount, total, paidAmount,
         paymentStatusValue, paymentMethod || null, paymentDate || null,
-        sourceChannel || null, receivedBy || null,
+        sourceChannelValue, receivedBy || null, agentId || null,
       ],
     )
 
@@ -309,7 +323,7 @@ router.post('/bookings', async (req, res, next) => {
       entityType: 'booking',
       entityId: rows[0].id,
       action: 'create',
-      changes: { listingId, fullName, checkIn, checkOut, rate, discount: discountAmount, total, status: status || 'pending' },
+      changes: { listingId, fullName, checkIn, checkOut, rate, discount: discountAmount, total, status: status || 'pending', agentId: agentId || null },
       actor: req.adminId,
     })
 

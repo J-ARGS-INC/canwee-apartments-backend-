@@ -10,6 +10,7 @@ import adminExpensesRouter from './routes/adminExpenses.js'
 import adminReportsRouter from './routes/adminReports.js'
 import adminUsersRouter from './routes/adminUsers.js'
 import adminPaymentsRouter from './routes/adminPayments.js'
+import adminAgentsRouter from './routes/adminAgents.js'
 import adminGuestsRouter from './routes/adminGuests.js'
 import adminSettingsRouter from './routes/adminSettings.js'
 import imagesRouter from './routes/images.js'
@@ -54,6 +55,7 @@ export function createApp() {
   app.use('/api/admin', adminReportsRouter)
   app.use('/api/admin/users', adminUsersRouter)
   app.use('/api/admin', adminPaymentsRouter)
+  app.use('/api/admin', adminAgentsRouter)
   app.use('/api/admin', adminGuestsRouter)
   app.use('/api/admin/settings', adminSettingsRouter)
   app.use('/api/analytics', analyticsRouter)
