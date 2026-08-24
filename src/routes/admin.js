@@ -6,6 +6,7 @@ import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter, loginLimiter } from '../middleware/rateLimiters.js'
 import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
+import { derivePaymentStatus } from '../lib/paymentStatus.js'
 
 // Precomputed so a login attempt for a username that doesn't exist still
 // spends real time in bcrypt.compare — otherwise "unknown username" would
@@ -13,7 +14,7 @@ import { diffFields, logAudit } from '../lib/auditLog.js'
 // enumerate valid usernames by timing alone.
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 12)
 
-const MONEY_FIELDS = ['ratePerNight', 'discount', 'totalAmount', 'amountPaid']
+const MONEY_FIELDS = ['ratePerNight', 'discount', 'totalAmount']
 // Creating a booking/expense needs no justification — an edit changing
 // values someone already recorded does, so the person making the change is
 // forced to leave a paper trail explaining why (a correction, a guest
@@ -36,38 +37,6 @@ function validateMoneyFields(body, errors) {
     if (!Number.isFinite(num) || num < 0) {
       errors[field] = `${field} must be a non-negative number.`
     }
-  }
-}
-
-// payment_status is a label an admin sets by hand, but amount_paid is what
-// actually drives revenue reporting (adminReports.js sums amount_paid, not
-// the label) — without this, an admin could switch a booking to "paid"
-// without the paid amount actually matching the total, so the sale would
-// show as paid in the list but not be reflected in collected revenue, or a
-// stale amount_paid could get labelled "paid" long after a discount changed
-// the total. This keeps the label and the number that's actually recorded
-// in sync at the moment either one changes.
-function validatePaymentConsistency({ paymentStatus, amountPaid, totalAmount }, errors) {
-  if (!paymentStatus) return
-  const paid = Number(amountPaid) || 0
-  const total = totalAmount != null ? Number(totalAmount) : null
-
-  if (paymentStatus === 'unpaid') {
-    if (paid > 0) errors.paymentStatus = 'Amount paid must be 0 for an unpaid booking.'
-    return
-  }
-
-  if (total == null) {
-    errors.paymentStatus = `Set a total amount before marking this booking as ${paymentStatus.replace('_', ' ')}.`
-    return
-  }
-
-  if (paymentStatus === 'part_payment' && !(paid > 0 && paid < total)) {
-    errors.paymentStatus = 'Amount paid must be more than 0 and less than the total for a part payment.'
-  } else if (paymentStatus === 'paid' && Math.abs(paid - total) > 0.01) {
-    errors.paymentStatus = 'Amount paid must equal the total amount to mark this booking as paid.'
-  } else if (paymentStatus === 'overpaid' && !(paid > total)) {
-    errors.paymentStatus = 'Amount paid must be more than the total to mark this booking as overpaid.'
   }
 }
 
@@ -105,13 +74,16 @@ const BOOKING_SELECT = `
 // Whitelisted camelCase -> column name so PATCH bodies can never target an
 // arbitrary column, only these explicitly-supported financial/booking-
 // management fields.
+// amount_paid / payment_status are deliberately NOT in this whitelist — the
+// payment-approval workflow (adminPayments.js) is the only place either can
+// change now. totalAmount can still move here; when it does, payment_status
+// is recomputed automatically below via derivePaymentStatus, never accepted
+// as raw client input.
 const FINANCE_FIELDS = {
   bookingDate: 'booking_date',
   ratePerNight: 'rate_per_night',
   discount: 'discount',
   totalAmount: 'total_amount',
-  amountPaid: 'amount_paid',
-  paymentStatus: 'payment_status',
   paymentMethod: 'payment_method',
   paymentDate: 'payment_date',
   sourceChannel: 'source_channel',
@@ -247,8 +219,8 @@ router.post('/bookings', async (req, res, next) => {
   try {
     const {
       listingId, fullName, email, phone, checkIn, checkOut, guests, notes,
-      status, bookingDate, ratePerNight, discount, totalAmount, amountPaid,
-      paymentStatus, paymentMethod, paymentDate, sourceChannel, receivedBy, agentId,
+      status, bookingDate, ratePerNight, discount, totalAmount,
+      paymentMethod, paymentDate, sourceChannel, receivedBy, agentId,
     } = req.body ?? {}
 
     const errors = {}
@@ -290,18 +262,18 @@ router.post('/bookings', async (req, res, next) => {
     const nights = Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)))
     const discountAmount = discount != null ? Number(discount) : 0
     const total = totalAmount != null ? Number(totalAmount) : nights * rate - discountAmount
-    const paidAmount = amountPaid != null ? Number(amountPaid) : 0
-    const paymentStatusValue = paymentStatus || 'unpaid'
+    // A brand-new booking never starts pre-paid — if the guest already paid
+    // at booking time, the admin logs it as a payment right after creating
+    // the booking, through the same receipt + super-admin-approval gate as
+    // any other payment (adminPayments.js). This is the only way
+    // amount_paid/payment_status can move now; see the FINANCE_FIELDS
+    // comment below for why they're not editable directly either.
+    const paidAmount = 0
+    const paymentStatusValue = 'unpaid'
     // A sensible default for staff who pick an agent but leave the channel
     // blank, without ever overwriting a channel they did specify — an agent
     // can still reach out over WhatsApp, so the two aren't always the same.
     const sourceChannelValue = sourceChannel || (agentId ? 'Agent' : null)
-
-    const paymentErrors = {}
-    validatePaymentConsistency({ paymentStatus: paymentStatusValue, amountPaid: paidAmount, totalAmount: total }, paymentErrors)
-    if (Object.keys(paymentErrors).length > 0) {
-      return res.status(400).json({ error: 'Validation failed', fields: paymentErrors })
-    }
 
     const { rows } = await pool.query(
       `insert into bookings (
@@ -389,26 +361,18 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
       return res.status(404).json({ error: 'Booking not found' })
     }
 
-    // Only re-check consistency when a payment-related field is actually
-    // part of this edit — an unrelated edit (e.g. fixing a typo in the
-    // guest's phone number) on an older booking that predates this check
-    // shouldn't suddenly get blocked by a mismatch it didn't create.
-    if ('paymentStatus' in body || 'amountPaid' in body || 'totalAmount' in body) {
-      const effectivePaymentStatus = 'paymentStatus' in body ? body.paymentStatus : before[0].payment_status
-      const effectiveAmountPaid = 'amountPaid' in body ? Number(body.amountPaid) : Number(before[0].amount_paid)
-      const effectiveTotalAmount =
-        'totalAmount' in body
-          ? (body.totalAmount != null ? Number(body.totalAmount) : null)
-          : (before[0].total_amount != null ? Number(before[0].total_amount) : null)
-
-      const paymentErrors = {}
-      validatePaymentConsistency(
-        { paymentStatus: effectivePaymentStatus, amountPaid: effectiveAmountPaid, totalAmount: effectiveTotalAmount },
-        paymentErrors,
-      )
-      if (Object.keys(paymentErrors).length > 0) {
-        return res.status(400).json({ error: 'Validation failed', fields: paymentErrors })
-      }
+    // payment_status is never client-supplied — when the edit changes
+    // totalAmount, recompute it from the *existing* amount_paid (untouched
+    // by this edit; only the payment-approval flow in adminPayments.js can
+    // move that) so a booking that was "paid" can't silently stay labelled
+    // "paid" after its total changes, without ever letting an admin just
+    // type in a new label that doesn't match the real paid amount.
+    let recomputedPaymentStatus = null
+    if ('totalAmount' in body) {
+      const newTotal = body.totalAmount != null ? Number(body.totalAmount) : null
+      recomputedPaymentStatus = derivePaymentStatus(Number(before[0].amount_paid), newTotal)
+      params.push(recomputedPaymentStatus)
+      setClauses.push(`payment_status = $${params.length}`)
     }
 
     // Optimistic concurrency: the client sends back the `updated_at` it
@@ -450,6 +414,14 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
       const column = FINANCE_FIELDS[key]
       beforeCamel[key] = before[0][column]
       afterCamel[key] = full[0][column]
+    }
+    // Not in FINANCE_FIELDS (it's auto-recomputed, not client-writable), but
+    // still worth capturing in the audit trail alongside the totalAmount
+    // change that triggered it.
+    if (recomputedPaymentStatus != null) {
+      beforeCamel.paymentStatus = before[0].payment_status
+      afterCamel.paymentStatus = full[0].payment_status
+      changedKeys.push('paymentStatus')
     }
     logAudit({
       entityType: 'booking',

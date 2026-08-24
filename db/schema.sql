@@ -425,13 +425,22 @@ create unique index if not exists agents_phone_unique_idx
 alter table bookings add column if not exists agent_id uuid references agents(id);
 create index if not exists bookings_agent_id_idx on bookings (agent_id);
 
--- Payment receipts (2026-08-24): optional evidence attached when an admin
--- logs a payment, for fraud prevention — a super admin can later inspect it
--- to confirm a logged payment is backed by a real receipt, not fabricated.
--- bytea in Postgres, never a static file or third-party object store, same
--- rule as listing_images/listing_videos. Deliberately NOT an input to
--- payment_status/derivePaymentStatus in adminPayments.js — that math is
--- untouched and still runs off amount alone; the receipt is supporting
--- evidence attached after the fact, not a determinant of it.
+-- Payment receipts (2026-08-24): evidence attached when an admin logs a
+-- payment, for fraud prevention — a super admin inspects it to confirm a
+-- logged payment is backed by a real receipt, not fabricated. bytea in
+-- Postgres, never a static file or third-party object store, same rule as
+-- listing_images/listing_videos. derivePaymentStatus (paymentStatus.js)
+-- still runs off amount alone the moment a payment is logged — a receipt is
+-- required evidence, but does not gate whether the payment counts.
 alter table payments add column if not exists receipt_content_type text;
 alter table payments add column if not exists receipt_data bytea;
+
+-- Second receipt image (2026-08-24) — only used when an admin marks a
+-- payment as a partial (half) payment, which reveals a second upload slot
+-- in the UI. (A pending/approved/rejected review-gate on top of this was
+-- tried in the same session and reverted per operator feedback — it caused
+-- workflow problems, so payments go back to counting as revenue the moment
+-- they're logged; the super admin's role stays view-only verification via
+-- GET /payments/:id/receipt/:slot in adminPayments.js, no accept/reject.)
+alter table payments add column if not exists receipt_content_type_2 text;
+alter table payments add column if not exists receipt_data_2 bytea;
