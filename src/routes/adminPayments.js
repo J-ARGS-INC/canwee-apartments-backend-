@@ -4,9 +4,10 @@ import { pool } from '../db.js'
 import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
 import { idempotent } from '../middleware/idempotency.js'
-import { maxLength } from '../lib/validate.js'
+import { isValidDate, maxLength } from '../lib/validate.js'
 import { logAudit } from '../lib/auditLog.js'
 import { derivePaymentStatus } from '../lib/paymentStatus.js'
+import { locationCondition } from '../lib/location.js'
 
 const router = Router()
 
@@ -56,13 +57,78 @@ function uploadReceipts(req, res, next) {
 router.get('/bookings/:id/payments', async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `select id, booking_id, amount, payment_method, payment_date, received_by, notes, created_at,
-              (receipt_data is not null) as has_receipt,
-              (receipt_data_2 is not null) as has_receipt_2
-       from payments where booking_id = $1 order by payment_date desc, created_at desc`,
+      `select p.id, p.booking_id, p.amount, p.payment_method, p.payment_date, p.received_by, p.notes, p.created_at,
+              (p.receipt_data is not null) as has_receipt,
+              (p.receipt_data_2 is not null) as has_receipt_2,
+              au.display_name as received_by_name
+       from payments p
+       left join admin_users au on au.id = p.received_by
+       where p.booking_id = $1 order by p.payment_date desc, p.created_at desc`,
       [req.params.id],
     )
     res.json(rows)
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Super-admin-only browsing view across every payment (not scoped to one
+// booking), filterable by location/apartment/date — the "where do I go
+// look for a receipt" counterpart to inspecting one from inside a
+// booking's own payment history. Same requireSuperAdmin boundary as the
+// receipt-bytes route below: a regular admin can attach a receipt but has
+// no path to list, browse, or view any receipt, their own included, once
+// it's uploaded.
+router.get('/payments', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { location, listingId, startDate, endDate } = req.query
+    const params = []
+    const conditions = []
+
+    if (listingId && typeof listingId === 'string') {
+      params.push(listingId)
+      conditions.push(`b.listing_id = $${params.length}`)
+    }
+    const locationCond = locationCondition(location, params, 'l')
+    if (locationCond) conditions.push(locationCond)
+    if (isValidDate(startDate)) {
+      params.push(startDate)
+      conditions.push(`p.payment_date >= $${params.length}`)
+    }
+    if (isValidDate(endDate)) {
+      params.push(endDate)
+      conditions.push(`p.payment_date <= $${params.length}`)
+    }
+
+    const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
+    const limitNum = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
+    const offsetNum = Math.max(0, Number(req.query.offset) || 0)
+
+    const { rows: countRows } = await pool.query(
+      `select count(*) from payments p join bookings b on b.id = p.booking_id join listings l on l.id = b.listing_id ${where}`,
+      params,
+    )
+    const total = Number(countRows[0].count)
+
+    const { rows } = await pool.query(
+      `select p.id, p.amount, p.payment_method, p.payment_date, p.notes, p.created_at,
+              (p.receipt_data is not null) as has_receipt,
+              (p.receipt_data_2 is not null) as has_receipt_2,
+              b.id as booking_id, b.booking_code, b.full_name as guest_name,
+              l.id as listing_id, l.title as listing_title, l.city as listing_city,
+              l.neighborhood as listing_neighborhood, l.unit_code,
+              au.display_name as received_by_name
+       from payments p
+       join bookings b on b.id = p.booking_id
+       join listings l on l.id = b.listing_id
+       left join admin_users au on au.id = p.received_by
+       ${where}
+       order by p.payment_date desc, p.created_at desc
+       limit $${params.length + 1} offset $${params.length + 2}`,
+      [...params, limitNum, offsetNum],
+    )
+
+    res.json({ payments: rows, total })
   } catch (err) {
     next(err)
   }
@@ -102,6 +168,14 @@ router.post('/bookings/:id/payments', idempotent(), uploadReceipts, async (req, 
     if (locked.length === 0) {
       await client.query('ROLLBACK')
       return res.status(404).json({ error: 'Booking not found.' })
+    }
+    // The frontend already hides the "Payment" button for a cancelled
+    // booking, but that's UI convenience, not enforcement — without this,
+    // a direct API call could still log a payment (and count it as
+    // revenue) against a booking nobody expects money on anymore.
+    if (locked[0].status === 'cancelled') {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ error: 'This booking is cancelled — payments can no longer be logged against it.' })
     }
 
     const { rows: inserted } = await client.query(

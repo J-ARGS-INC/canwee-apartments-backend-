@@ -46,9 +46,9 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
 
   const { rows: totals } = await pool.query(
     `select
-      coalesce(sum(b.total_amount), 0) as total_revenue,
-      coalesce(sum(b.amount_paid), 0) as total_collected,
-      coalesce(sum(b.balance), 0) as total_outstanding,
+      coalesce(sum(b.total_amount) filter (where b.status != 'cancelled'), 0) as total_revenue,
+      coalesce(sum(b.amount_paid) filter (where b.status != 'cancelled'), 0) as total_collected,
+      coalesce(sum(b.balance) filter (where b.status != 'cancelled'), 0) as total_outstanding,
       count(*) filter (where b.status != 'cancelled') as active_bookings,
       count(*) as total_bookings
     from bookings b
@@ -76,7 +76,7 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
            count(*) as bookings
     from bookings b
     join listings l on l.id = b.listing_id
-    where b.amount_paid > 0 ${bookingWhereAnd}
+    where b.amount_paid > 0 and b.status != 'cancelled' ${bookingWhereAnd}
     group by payment_method
     order by collected desc`,
     bookingParams,
