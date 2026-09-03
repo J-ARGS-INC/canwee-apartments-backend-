@@ -28,6 +28,17 @@ function nightsBetween(checkIn, checkOut) {
   return Math.max(0, Math.round(ms / (1000 * 60 * 60 * 24)))
 }
 
+// "Today" for a past-date check needs to mean Lagos's calendar day, not the
+// server process's own timezone (which runs on UTC in production) — WAT is
+// a fixed UTC+1 with no DST, so shifting the clock forward an hour before
+// taking the date portion reliably gives Lagos's date regardless of what
+// timezone this process happens to run in. Using plain UTC "today" here
+// would let a guest booking in the first hour after midnight WAT submit a
+// check-in date that has already passed for them locally.
+function todayInLagos() {
+  return new Date(Date.now() + 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
 router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next) => {
   try {
     const { listingId, fullName, email, phone, checkIn, checkOut, guests, notes } = req.body ?? {}
@@ -41,7 +52,7 @@ router.post('/', createSubmissionLimiter(), idempotent(), async (req, res, next)
     maxLength(email, 'email', 200, errors)
     maxLength(notes, 'notes', 2000, errors)
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today = todayInLagos()
     if (!isValidDate(checkIn)) {
       errors.checkIn = 'Enter a valid check-in date.'
     } else if (checkIn < today) {

@@ -15,6 +15,7 @@ import { derivePaymentStatus } from '../lib/paymentStatus.js'
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 12)
 
 const MONEY_FIELDS = ['ratePerNight', 'discount', 'totalAmount']
+
 // Creating a booking/expense needs no justification — an edit changing
 // values someone already recorded does, so the person making the change is
 // forced to leave a paper trail explaining why (a correction, a guest
@@ -262,6 +263,17 @@ router.post('/bookings', async (req, res, next) => {
     const nights = Math.max(0, Math.round((new Date(checkOut) - new Date(checkIn)) / (1000 * 60 * 60 * 24)))
     const discountAmount = discount != null ? Number(discount) : 0
     const total = totalAmount != null ? Number(totalAmount) : nights * rate - discountAmount
+    // Only checked for the auto-computed case — an explicit totalAmount is
+    // already covered by validateMoneyFields' non-negative check above.
+    // Without this, a discount bigger than the room subtotal would only be
+    // caught by the DB's nonnegative-amounts check constraint, surfacing to
+    // the admin as an opaque "Internal server error" instead of a clear one.
+    if (totalAmount == null && total < 0) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        fields: { discount: 'Discount cannot be greater than the room total.' },
+      })
+    }
     // A brand-new booking never starts pre-paid — if the guest already paid
     // at booking time, the admin logs it as a payment right after creating
     // the booking, through the same receipt + super-admin-approval gate as
@@ -361,6 +373,18 @@ router.patch('/bookings/:id/details', async (req, res, next) => {
       return res.status(404).json({ error: 'Booking not found' })
     }
 
+    // total_amount is deliberately NOT auto-recomputed from ratePerNight/
+    // discount here — real bookings in production already have totals that
+    // don't follow nights*rate-discount at all (a negotiated/custom total
+    // entered directly at creation, overriding the formula, is a supported
+    // and common case; see the "explicit totalAmount trusted as-is" comment
+    // on POST /bookings above). Auto-deriving total_amount on every
+    // rate/discount edit would silently clobber those custom totals the
+    // next time anyone touched either field for an unrelated reason (e.g.
+    // just correcting a record-keeping typo). ratePerNight and discount are
+    // therefore reference/breakdown fields once a booking exists — an admin
+    // who actually needs the total to change edits totalAmount directly.
+    //
     // payment_status is never client-supplied — when the edit changes
     // totalAmount, recompute it from the *existing* amount_paid (untouched
     // by this edit; only the payment-approval flow in adminPayments.js can

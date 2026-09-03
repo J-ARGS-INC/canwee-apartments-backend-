@@ -44,6 +44,10 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
   if (expenseLocationCond) expenseConditions.push(expenseLocationCond)
   const expenseWhere = `where ${expenseConditions.join(' and ')}`
 
+  // The refundable caution fee is collected separately, offline — it's
+  // never added into total_amount/amount_paid (see routes/bookings.js and
+  // routes/admin.js), so every figure below can just sum those columns
+  // directly with no exclusion math needed.
   const { rows: totals } = await pool.query(
     `select
       coalesce(sum(b.total_amount) filter (where b.status != 'cancelled'), 0) as total_revenue,

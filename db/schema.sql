@@ -444,3 +444,21 @@ alter table payments add column if not exists receipt_data bytea;
 -- GET /payments/:id/receipt/:slot in adminPayments.js, no accept/reject.)
 alter table payments add column if not exists receipt_content_type_2 text;
 alter table payments add column if not exists receipt_data_2 bytea;
+
+-- Agent gender (2026-09-02) — the operator's real agent roster tracks this
+-- alongside name/phone; optional since it adds nothing functional (no
+-- report groups by it), it's just preserved from the source data.
+alter table agents add column if not exists gender text;
+
+-- Caution fee (2026-09-02, reverted from the money math 2026-09-03): every
+-- real booking involves a flat, refundable ₦50,000 caution fee — promised
+-- on the site's own policy pages — but it is collected separately, offline,
+-- not calculated into total_amount/amount_paid or any revenue figure. This
+-- column exists from an earlier attempt at folding it into total_amount and
+-- tracking a checkout-time refund step; both were reverted per operator
+-- feedback (it caused confusion in revenue reporting), so the column is now
+-- unused by application logic — kept only because a handful of real,
+-- already-created bookings have a real value in it, not worth a destructive
+-- drop for. New bookings still get the `default 50000` value here, but
+-- nothing reads it.
+alter table bookings add column if not exists caution_fee numeric not null default 50000;

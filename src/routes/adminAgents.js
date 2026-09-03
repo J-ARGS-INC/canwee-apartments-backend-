@@ -14,7 +14,7 @@ router.use(adminLimiter)
 // brand-new agent mid-booking would break that same real-time workflow.
 router.get('/agents', async (req, res, next) => {
   try {
-    const { rows } = await pool.query('select id, name, phone from agents order by name')
+    const { rows } = await pool.query('select id, name, phone, gender from agents order by name')
     res.json(rows)
   } catch (err) {
     next(err)
@@ -23,19 +23,20 @@ router.get('/agents', async (req, res, next) => {
 
 router.post('/agents', async (req, res, next) => {
   try {
-    const { name, phone } = req.body ?? {}
+    const { name, phone, gender } = req.body ?? {}
 
     const errors = {}
     requireString(name, 'name', errors)
     maxLength(name, 'name', 200, errors)
     maxLength(phone, 'phone', 30, errors)
+    maxLength(gender, 'gender', 30, errors)
     if (Object.keys(errors).length > 0) {
       return res.status(400).json({ error: 'Validation failed', fields: errors })
     }
 
     const { rows } = await pool.query(
-      'insert into agents (name, phone) values ($1, $2) returning id, name, phone',
-      [name.trim(), phone || null],
+      'insert into agents (name, phone, gender) values ($1, $2, $3) returning id, name, phone, gender',
+      [name.trim(), phone || null, gender || null],
     )
     res.status(201).json(rows[0])
   } catch (err) {

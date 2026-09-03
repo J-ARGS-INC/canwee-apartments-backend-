@@ -256,10 +256,16 @@ router.get('/export/workbook.xlsx', requireSuperAdmin, async (req, res, next) =>
     ]
     summarySheet.getRow(1).font = { bold: true }
 
+    // Excludes cancelled bookings, same as buildSummaryReport (reports.js)
+    // — this is a separate query (the full unfiltered workbook export, not
+    // the date/location-scoped JSON summary) but needs the identical
+    // definition so the two never disagree about what counts as revenue.
+    // The caution fee is collected separately, offline, and never added
+    // into total_amount/amount_paid, so no exclusion math is needed here.
     const { rows: totals } = await pool.query(`
-      select coalesce(sum(total_amount), 0) as total_revenue,
-             coalesce(sum(amount_paid), 0) as total_collected,
-             coalesce(sum(balance), 0) as total_outstanding
+      select coalesce(sum(total_amount) filter (where status != 'cancelled'), 0) as total_revenue,
+             coalesce(sum(amount_paid) filter (where status != 'cancelled'), 0) as total_collected,
+             coalesce(sum(balance) filter (where status != 'cancelled'), 0) as total_outstanding
       from bookings
     `)
     const { rows: expenseTotal } = await pool.query(
