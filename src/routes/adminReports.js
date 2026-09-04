@@ -67,7 +67,7 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
     const doc = new PDFDocument({ margin: 50, size: 'A4' })
     doc.pipe(res)
 
-    doc.fontSize(18).font('Helvetica-Bold').text('Canwee Apartments — Payment Summary')
+    doc.fontSize(18).font('Helvetica-Bold').text('Canwee Apartments: Payment Summary')
     const periodLabel = startDate || endDate ? `${startDate || 'inception'} to ${endDate || 'today'}` : 'All time'
     const locationLabel = report.location ? LOCATION_PDF_LABEL[report.location] || report.location : 'All locations'
     doc
@@ -109,7 +109,7 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
       }
       doc.fontSize(9).font('Helvetica')
       for (const row of rows) {
-        doc.fillColor('#333').text(`${columns.label(row)}  —  ${columns.value(row)}`)
+        doc.fillColor('#333').text(`${columns.label(row)}: ${columns.value(row)}`)
       }
     }
 
@@ -118,7 +118,7 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
     section('Expenses by location', report.expenseByLocation, { label: (r) => r.location, value: (r) => formatMoney(r.amount) })
     section('Net profit by location', report.netProfitByLocation, { label: (r) => r.location, value: (r) => formatMoney(r.netProfit) })
     section('Bookings by source & location', report.bySourceByLocation, {
-      label: (r) => `${r.location} — ${r.sourceChannel}`,
+      label: (r) => `${r.location} · ${r.sourceChannel}`,
       value: (r) => String(r.bookings),
     })
     section('Bookings by agent', report.byAgent, {

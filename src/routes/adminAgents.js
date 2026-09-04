@@ -43,7 +43,7 @@ router.post('/agents', async (req, res, next) => {
     // The partial unique index on phone — same duplicate this table exists
     // to prevent from creeping back in at data-entry time.
     if (err.code === '23505') {
-      return res.status(409).json({ error: 'An agent with this phone number already exists — pick them from the list instead.' })
+      return res.status(409).json({ error: 'An agent with this phone number already exists. Pick them from the list instead.' })
     }
     next(err)
   }

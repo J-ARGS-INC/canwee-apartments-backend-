@@ -151,7 +151,7 @@ router.post('/bookings/:id/payments', idempotent(), uploadReceipts, async (req, 
   maxLength(notes, 'notes', 2000, errors)
   // Receipt evidence is mandatory for every payment, not optional supporting
   // material — no admin can log a payment without attaching proof of it.
-  if (files.length === 0) errors.receipt = 'Attach a payment receipt (JPEG, PNG, WEBP, or PDF) — this is required.'
+  if (files.length === 0) errors.receipt = 'Attach a payment receipt (JPEG, PNG, WEBP, or PDF). This is required.'
   if (Object.keys(errors).length > 0) return res.status(400).json({ error: 'Please fix the highlighted fields.', fields: errors })
 
   const client = await pool.connect()
@@ -175,7 +175,7 @@ router.post('/bookings/:id/payments', idempotent(), uploadReceipts, async (req, 
     // revenue) against a booking nobody expects money on anymore.
     if (locked[0].status === 'cancelled') {
       await client.query('ROLLBACK')
-      return res.status(400).json({ error: 'This booking is cancelled — payments can no longer be logged against it.' })
+      return res.status(400).json({ error: 'This booking is cancelled. Payments can no longer be logged against it.' })
     }
 
     const { rows: inserted } = await client.query(

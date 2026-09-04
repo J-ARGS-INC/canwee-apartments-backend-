@@ -9,6 +9,12 @@ export const SETTING_DEFAULTS = {
   notify_emails: [],
   expense_categories: ['Utilities', 'Maintenance', 'Cleaning', 'Supplies', 'Staff', 'Marketing', 'Other'],
   payment_methods: ['Cash', 'Bank Transfer', 'POS', 'Card', 'Other'],
+  // Naira discount applied per night stayed, e.g. 10000 = ₦10,000 off for a
+  // 1-night stay, ₦30,000 off for 3 nights. Used only to pre-fill a new
+  // booking's Discount field client-side (BookingFormModal) — the admin can
+  // still override it per booking, and it's never recomputed on edit, same
+  // as the discount field itself.
+  default_discount_per_night: 0,
 }
 
 export async function getSetting(key) {

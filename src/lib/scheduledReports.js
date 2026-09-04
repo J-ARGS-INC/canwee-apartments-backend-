@@ -43,7 +43,7 @@ export async function sendDailyDigest() {
   const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 
   await sendNotificationEmail({
-    subject: `Daily digest — ${checkInsToday.length} check-in(s), ${checkOutsToday.length} check-out(s) today`,
+    subject: `Daily digest: ${checkInsToday.length} check-in(s), ${checkOutsToday.length} check-out(s) today`,
     html: dailyDigestEmail({
       dateLabel,
       checkInsToday,
@@ -94,7 +94,7 @@ export async function sendWeeklyDigest() {
   const weekLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
 
   await sendNotificationEmail({
-    subject: `Weekly summary — ${weekLabel}`,
+    subject: `Weekly summary: ${weekLabel}`,
     html: weeklyDigestEmail({
       weekLabel,
       report,
@@ -130,7 +130,7 @@ export async function sendMonthlyReport() {
   const monthLabel = monthStart.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
 
   await sendNotificationEmail({
-    subject: `Monthly report — ${monthLabel}`,
+    subject: `Monthly report: ${monthLabel}`,
     html: monthlyReportEmail({ monthLabel, report, paymentStatusCounts, dashboardUrl: ADMIN_DASHBOARD_URL }),
   })
 }

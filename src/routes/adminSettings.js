@@ -33,6 +33,10 @@ function validateValue(key, value) {
     if (!Array.isArray(value) || value.length === 0 || value.some((v) => typeof v !== 'string' || !v.trim())) {
       return `${key} must be a non-empty list of labels.`
     }
+  } else if (key === 'default_discount_per_night') {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return 'default_discount_per_night must be a non-negative number.'
+    }
   }
   return null
 }
