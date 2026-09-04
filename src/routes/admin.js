@@ -171,8 +171,10 @@ router.get('/bookings', async (req, res, next) => {
     const where = conditions.length ? `where ${conditions.join(' and ')}` : ''
 
     // Paginated so the list stays fast and manageable as bookings pile up
-    // over time — newest first, older ones only loaded on request (the
-    // "Load more" button in BookingsTab) rather than all at once. The
+    // over time — most recently added first (by created_at, not check-in
+    // date, so a booking entered today sits at the top regardless of when
+    // the guest's stay actually falls), older ones only loaded on request
+    // (the "Load more" button in BookingsTab) rather than all at once. The
     // Excel export uses its own unpaginated query in adminReports.js, so
     // it's unaffected and always includes the full history.
     const limitNum = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -182,7 +184,7 @@ router.get('/bookings', async (req, res, next) => {
     const total = Number(countRows[0].count)
 
     const { rows } = await pool.query(
-      `${BOOKING_SELECT} ${where} order by b.check_in desc limit $${params.length + 1} offset $${params.length + 2}`,
+      `${BOOKING_SELECT} ${where} order by b.created_at desc limit $${params.length + 1} offset $${params.length + 2}`,
       [...params, limitNum, offsetNum],
     )
 
