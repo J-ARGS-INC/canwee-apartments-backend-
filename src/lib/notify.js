@@ -1,11 +1,32 @@
+import { getSetting } from './settings.js'
+
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
 
-function getAdminRecipients() {
+function envRecipients() {
   return (process.env.NOTIFY_EMAILS || '')
     .split(',')
     .map((email) => email.trim())
     .filter(Boolean)
-    .map((email) => ({ email }))
+}
+
+// Reads from the DB setting a super admin can actually edit (SettingsTab),
+// falling back to the NOTIFY_EMAILS env var only when that setting is
+// empty/unset — previously this always read the env var and ignored the
+// setting entirely, so editing it in the UI had no effect on real
+// delivery. Used for booking/contact-form alerts; scheduledReports.js's
+// three digests each have their own dedicated setting (see
+// getDigestRecipients below), falling back to this same list in turn.
+async function getAdminRecipients() {
+  const stored = await getSetting('notify_emails')
+  const emails = Array.isArray(stored) && stored.length > 0 ? stored : envRecipients()
+  return emails.map((email) => ({ email }))
+}
+
+// key: 'daily_digest_emails' | 'weekly_digest_emails' | 'monthly_digest_emails'
+export async function getDigestRecipients(key) {
+  const stored = await getSetting(key)
+  if (Array.isArray(stored) && stored.length > 0) return stored.map((email) => ({ email }))
+  return getAdminRecipients()
 }
 
 // Fire-and-forget from the caller's point of view: a failed send should
@@ -44,10 +65,16 @@ async function sendEmail({ to, subject, html }) {
   }
 }
 
-// Sent to the fixed internal team list (NOTIFY_EMAILS) — new bookings, new
-// contact messages, anything the business needs to act on.
-export function sendNotificationEmail({ subject, html }) {
-  return sendEmail({ to: getAdminRecipients(), subject, html })
+// Sent to the internal team list (notify_emails setting, env fallback) —
+// new bookings, new contact messages, anything the business needs to act on.
+export async function sendNotificationEmail({ subject, html }) {
+  return sendEmail({ to: await getAdminRecipients(), subject, html })
+}
+
+// Used by scheduledReports.js, whose three digests each have their own
+// recipient list (getDigestRecipients above) instead of the shared one.
+export function sendEmailTo(to, { subject, html }) {
+  return sendEmail({ to, subject, html })
 }
 
 // Sent to a single guest/customer address, e.g. their booking confirmation.

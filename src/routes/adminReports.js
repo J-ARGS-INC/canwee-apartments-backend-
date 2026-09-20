@@ -5,6 +5,7 @@ import { pool } from '../db.js'
 import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
 import { buildSummaryReport } from '../lib/reports.js'
+import { getLocationTree, getFilterLabel, parseLocationFilter } from '../lib/hierarchy.js'
 
 const router = Router()
 
@@ -15,6 +16,66 @@ router.use(adminLimiter)
 // spec — staff get operational routes (availability) but not money or the
 // audit trail. /availability deliberately stays on plain requireAdmin
 // since staff need it for day-to-day check-in/check-out work.
+// Batch-fetches minimal display context (booking code/guest, expense code/
+// category, admin display name...) for one page of audit_log rows, so the
+// frontend can render a full human sentence ("Tomiwa cancelled booking
+// IKE-0045 for Mr Femi...") instead of a raw entity_type + truncated id.
+// One targeted query per entity_type actually present on the page — same
+// multi-query-merged-in-JS pattern lib/reports.js's buildSummaryReport
+// already uses, not a new idiom for this codebase.
+async function enrichAuditRows(rows) {
+  const actorIds = [...new Set(rows.map((r) => r.actor).filter((a) => a && a !== 'system'))]
+  const bookingIds = [...new Set(rows.filter((r) => r.entity_type === 'booking').map((r) => r.entity_id))]
+  const expenseIds = [...new Set(rows.filter((r) => r.entity_type === 'expense').map((r) => r.entity_id))]
+  const adminUserIds = [...new Set(rows.filter((r) => r.entity_type === 'admin_user').map((r) => r.entity_id))]
+  const paymentIds = [...new Set(rows.filter((r) => r.entity_type === 'payment').map((r) => r.entity_id))]
+
+  const [actorRows, bookingRows, expenseRows, adminUserRows, paymentRows] = await Promise.all([
+    actorIds.length
+      ? pool.query('select id, display_name from admin_users where id = any($1)', [actorIds])
+      : { rows: [] },
+    bookingIds.length
+      ? pool.query(
+          `select b.id, b.booking_code, b.full_name, l.title as listing_title, l.unit_code
+           from bookings b join listings l on l.id = b.listing_id where b.id = any($1)`,
+          [bookingIds],
+        )
+      : { rows: [] },
+    expenseIds.length
+      ? pool.query(
+          `select e.id, e.expense_code, e.category, l.title as listing_title, l.unit_code
+           from expenses e left join listings l on l.id = e.listing_id where e.id = any($1)`,
+          [expenseIds],
+        )
+      : { rows: [] },
+    adminUserIds.length
+      ? pool.query('select id, display_name from admin_users where id = any($1)', [adminUserIds])
+      : { rows: [] },
+    paymentIds.length
+      ? pool.query(
+          `select p.id, b.booking_code, b.full_name
+           from payments p join bookings b on b.id = p.booking_id where p.id = any($1)`,
+          [paymentIds],
+        )
+      : { rows: [] },
+  ])
+
+  const actorNameById = new Map(actorRows.rows.map((r) => [r.id, r.display_name]))
+  const bookingById = new Map(bookingRows.rows.map((r) => [r.id, r]))
+  const expenseById = new Map(expenseRows.rows.map((r) => [r.id, r]))
+  const adminUserById = new Map(adminUserRows.rows.map((r) => [r.id, r]))
+  const paymentById = new Map(paymentRows.rows.map((r) => [r.id, r]))
+
+  return rows.map((r) => ({
+    ...r,
+    actorName: r.actor === 'system' ? 'System' : actorNameById.get(r.actor) || null,
+    booking: bookingById.get(r.entity_id) || null,
+    expense: expenseById.get(r.entity_id) || null,
+    adminUser: adminUserById.get(r.entity_id) || null,
+    payment: paymentById.get(r.entity_id) || null,
+  }))
+}
+
 router.get('/audit-log', requireSuperAdmin, async (req, res, next) => {
   try {
     const { entityType, entityId } = req.query
@@ -35,7 +96,7 @@ router.get('/audit-log', requireSuperAdmin, async (req, res, next) => {
        from audit_log ${where} order by created_at desc limit 200`,
       params,
     )
-    res.json(rows)
+    res.json(await enrichAuditRows(rows))
   } catch (err) {
     next(err)
   }
@@ -44,7 +105,17 @@ router.get('/audit-log', requireSuperAdmin, async (req, res, next) => {
 router.get('/reports/summary', requireSuperAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, location } = req.query
-    res.json(await buildSummaryReport({ startDate, endDate, location }))
+    res.json(await buildSummaryReport({ startDate, endDate, locationFilter: parseLocationFilter(location) }))
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Location -> Area -> Unit tree, feeding the expense form's scope picker and
+// the Analytics/Payment Summary location filters (see lib/hierarchy.js).
+router.get('/locations', async (req, res, next) => {
+  try {
+    res.json(await getLocationTree())
   } catch (err) {
     next(err)
   }
@@ -54,12 +125,11 @@ function formatMoney(amount) {
   return `NGN ${Math.round(amount).toLocaleString('en-US')}`
 }
 
-const LOCATION_PDF_LABEL = { ikeja: 'Ikeja', gbagada: 'Gbagada', abeokuta: 'Abeokuta' }
-
 router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, location } = req.query
-    const report = await buildSummaryReport({ startDate, endDate, location })
+    const locationFilter = parseLocationFilter(location)
+    const report = await buildSummaryReport({ startDate, endDate, locationFilter })
 
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `attachment; filename="canwee-summary-${new Date().toISOString().slice(0, 10)}.pdf"`)
@@ -69,7 +139,7 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
 
     doc.fontSize(18).font('Helvetica-Bold').text('Canwee Apartments: Payment Summary')
     const periodLabel = startDate || endDate ? `${startDate || 'inception'} to ${endDate || 'today'}` : 'All time'
-    const locationLabel = report.location ? LOCATION_PDF_LABEL[report.location] || report.location : 'All locations'
+    const locationLabel = (await getFilterLabel(locationFilter)) || 'All locations'
     doc
       .fontSize(10)
       .font('Helvetica')
@@ -138,15 +208,38 @@ router.get('/export/summary.pdf', requireSuperAdmin, async (req, res, next) => {
 
 router.get('/availability', async (req, res, next) => {
   try {
+    // Two modes: with no month/year given, "today onward, unbounded" — the
+    // original default behavior, still exactly what the per-unit upcoming-
+    // stays cards in AvailabilityTab want (unaffected by the fix below).
+    // With an explicit month/year, scoped to exactly that calendar month
+    // via the daterange overlap operator already used by the DB's own
+    // booking-overlap constraint, with no lower bound — so a past month is
+    // just as queryable as the current or a future one. This is what
+    // AvailabilityCalendar.jsx now calls when browsing, replacing the old
+    // hardcoded "check_out >= current_date" filter, which silently dropped
+    // every past booking from the response no matter which month was
+    // being viewed.
+    let bookingCondition = "status not in ('cancelled', 'no_show') and check_out >= current_date"
+    const bookingParams = []
+    if (req.query.month || req.query.year) {
+      const now = new Date()
+      const year = Math.max(2000, Math.min(3000, Number(req.query.year) || now.getFullYear()))
+      const month = Math.max(1, Math.min(12, Number(req.query.month) || now.getMonth() + 1))
+      bookingParams.push(`${year}-${String(month).padStart(2, '0')}-01`)
+      bookingCondition =
+        "status not in ('cancelled', 'no_show') and stay_range && daterange($1::date, ($1::date + interval '1 month')::date, '[)')"
+    }
+
     const { rows: listingsRows } = await pool.query(
       `select id, title, city, unit_code from listings order by city, title`,
     )
-    const { rows: bookingRows } = await pool.query(`
-      select listing_id, check_in, check_out, status, full_name
-      from bookings
-      where status not in ('cancelled', 'no_show') and check_out >= current_date
-      order by check_in
-    `)
+    const { rows: bookingRows } = await pool.query(
+      `select listing_id, check_in, check_out, status, full_name
+       from bookings
+       where ${bookingCondition}
+       order by check_in`,
+      bookingParams,
+    )
 
     const byListing = new Map()
     for (const booking of bookingRows) {

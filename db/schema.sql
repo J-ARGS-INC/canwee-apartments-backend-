@@ -462,3 +462,64 @@ alter table agents add column if not exists gender text;
 -- drop for. New bookings still get the `default 50000` value here, but
 -- nothing reads it.
 alter table bookings add column if not exists caution_fee numeric not null default 50000;
+
+-- Location hierarchy (2026-09-20): Location -> Area -> Unit, replacing the
+-- hardcoded 3-entry map in lib/location.js (city/neighborhood string
+-- matching) with real FK-backed tables. Abeokuta has no areas — its units
+-- sit directly under the location; Lagos has two areas (Ikeja, Gbagada),
+-- each with its own units. Confirmed against production data before this
+-- migration: 11 listings exist (7 Abeokuta, 2 Ikeja, 2 Gbagada), all
+-- cleanly mapped by the backfill below.
+create table if not exists locations (
+  id text primary key,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists areas (
+  id text primary key,
+  location_id text not null references locations(id),
+  name text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists areas_location_id_idx on areas (location_id);
+
+insert into locations (id, name) values ('lagos', 'Lagos'), ('abeokuta', 'Abeokuta')
+  on conflict (id) do nothing;
+insert into areas (id, location_id, name) values ('ikeja', 'lagos', 'Ikeja'), ('gbagada', 'lagos', 'Gbagada')
+  on conflict (id) do nothing;
+
+alter table listings add column if not exists location_id text references locations(id);
+alter table listings add column if not exists area_id text references areas(id);
+update listings set location_id = case city when 'Lagos' then 'lagos' when 'Abeokuta' then 'abeokuta' end
+  where location_id is null;
+update listings set area_id = case neighborhood when 'Ikeja' then 'ikeja' when 'Gbagada' then 'gbagada' end
+  where area_id is null;
+-- Safe to enforce NOT NULL: the backfill above covers every existing
+-- listing (city is always 'Lagos' or 'Abeokuta' today), and any future
+-- listing insert must supply one.
+alter table listings alter column location_id set not null;
+
+-- Expenses get their own location_id/area_id (not just listing_id) so an
+-- expense can be scoped to "Ikeja generally" or "Abeokuta generally" with
+-- no specific unit — something the old city/neighborhood join could never
+-- represent. Only rows already tied to a listing (22 of 63 in production)
+-- can be safely backfilled from that listing's own hierarchy; the other 41
+-- pre-existing "General" rows (listing_id is null) have no recoverable
+-- location and are deliberately left null — excluded from location rollups
+-- as an "Unclassified / pre-migration" bucket rather than guessed at. For
+-- that reason location_id is NOT made NOT NULL here — the requirement that
+-- every expense has a location is enforced in adminExpenses.js for new/
+-- edited rows only, not retroactively at the DB level.
+alter table expenses add column if not exists location_id text references locations(id);
+alter table expenses add column if not exists area_id text references areas(id);
+update expenses e set location_id = l.location_id, area_id = l.area_id
+  from listings l where e.listing_id = l.id and e.location_id is null;
+
+-- Mandatory cancellation reason (2026-09-20): a regular admin cancelling a
+-- booking must record why (super admins are exempt — see admin.js); who
+-- and exactly when are recorded alongside it, separate from the existing
+-- checkout_reason/checked_out_by pair (a different transition entirely).
+alter table bookings add column if not exists cancellation_reason text;
+alter table bookings add column if not exists cancelled_by text references admin_users(id);
+alter table bookings add column if not exists cancelled_at timestamptz;

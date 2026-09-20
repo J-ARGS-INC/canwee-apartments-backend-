@@ -5,7 +5,7 @@ import { adminLimiter } from '../middleware/rateLimiters.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
 import { maxLength, isValidDate } from '../lib/validate.js'
 import { idempotent } from '../middleware/idempotency.js'
-import { locationCondition } from '../lib/location.js'
+import { hierarchyFilterCondition, parseLocationFilter, resolveExpenseScope } from '../lib/hierarchy.js'
 
 const EXPENSE_FIELDS = {
   expenseDate: 'expense_date',
@@ -13,6 +13,8 @@ const EXPENSE_FIELDS = {
   description: 'description',
   amount: 'amount',
   listingId: 'listing_id',
+  areaId: 'area_id',
+  locationId: 'location_id',
   paidTo: 'paid_to',
   loggedBy: 'logged_by',
   notes: 'notes',
@@ -31,9 +33,11 @@ router.get('/', async (req, res, next) => {
     const offsetNum = Math.max(0, Number(req.query.offset) || 0)
     const { startDate, endDate, location } = req.query
 
-    // Every query below left-joins listings (an expense's listing_id is
-    // nullable — "General" expenses have no location) and shares the same
-    // condition set, so the count/total and the page of rows always agree.
+    // location_id/area_id/listing_id live directly on expenses now — the
+    // listings left-join below is only for display (title/city), the
+    // location filter itself applies straight to expenses' own columns and
+    // so correctly matches location/area-general expenses too, not just
+    // ones tied to a specific listing.
     const params = []
     const conditions = ['e.deleted_at is null']
     if (isValidDate(startDate)) {
@@ -44,7 +48,7 @@ router.get('/', async (req, res, next) => {
       params.push(endDate)
       conditions.push(`e.expense_date <= $${params.length}`)
     }
-    const locCond = locationCondition(location, params, 'l')
+    const locCond = hierarchyFilterCondition(parseLocationFilter(location), params, { table: 'expenses', alias: 'e' })
     if (locCond) conditions.push(locCond)
     const where = `where ${conditions.join(' and ')}`
 
@@ -60,11 +64,14 @@ router.get('/', async (req, res, next) => {
 
     const { rows } = await pool.query(
       `select e.id, e.expense_code, e.expense_date, e.category, e.description, e.amount, e.listing_id,
+              e.location_id, e.area_id, loc.name as location_name, ar.name as area_name,
               e.paid_to, e.logged_by, e.paid_by, pb.display_name as paid_by_name,
               e.notes, e.created_at, e.updated_at, l.title as listing_title, l.city as listing_city,
               l.neighborhood as listing_neighborhood
        from expenses e
        left join listings l on l.id = e.listing_id
+       left join locations loc on loc.id = e.location_id
+       left join areas ar on ar.id = e.area_id
        left join admin_users pb on pb.id = e.paid_by
        ${where}
        order by e.expense_date desc, e.created_at desc
@@ -82,7 +89,8 @@ router.get('/', async (req, res, next) => {
 // first response, not log the expense twice.
 router.post('/', idempotent(), async (req, res, next) => {
   try {
-    const { expenseDate, category, description, amount, listingId, paidTo, loggedBy, notes } = req.body ?? {}
+    const { expenseDate, category, description, amount, listingId, areaId, locationId, paidTo, loggedBy, notes } =
+      req.body ?? {}
 
     const errors = {}
     if (!category || typeof category !== 'string' || !category.trim()) errors.category = 'Category is required.'
@@ -94,19 +102,33 @@ router.post('/', idempotent(), async (req, res, next) => {
     maxLength(loggedBy, 'loggedBy', 200, errors)
     maxLength(notes, 'notes', 2000, errors)
 
+    // "General/no location" no longer exists — every expense must resolve
+    // to a location, optionally narrowed to an area or a specific unit.
+    // resolveExpenseScope looks up the real ancestry server-side (never
+    // trusts a client-asserted combination) and 404s a bogus id.
+    let scope
+    try {
+      scope = await resolveExpenseScope({ locationId, areaId, listingId })
+    } catch (scopeErr) {
+      if (scopeErr?.field) errors[scopeErr.field] = scopeErr.message
+      else throw scopeErr
+    }
+
     if (Object.keys(errors).length > 0) {
       return res.status(400).json({ error: 'Validation failed', fields: errors })
     }
 
     const { rows } = await pool.query(
-      `insert into expenses (expense_date, category, description, amount, listing_id, paid_to, logged_by, notes, paid_by)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id, expense_code`,
+      `insert into expenses (expense_date, category, description, amount, listing_id, area_id, location_id, paid_to, logged_by, notes, paid_by)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning id, expense_code`,
       [
         expenseDate || new Date().toISOString().slice(0, 10),
         category,
         description || null,
         amountNum,
-        listingId || null,
+        scope.listingId,
+        scope.areaId,
+        scope.locationId,
         paidTo || null,
         loggedBy || null,
         notes || null,
@@ -122,7 +144,7 @@ router.post('/', idempotent(), async (req, res, next) => {
       entityType: 'expense',
       entityId: rows[0].id,
       action: 'create',
-      changes: { category, amount: amountNum, listingId, paidTo },
+      changes: { category, amount: amountNum, ...scope, paidTo },
       actor: req.adminId,
     })
 
@@ -156,6 +178,28 @@ router.patch('/:id', async (req, res, next) => {
     maxLength(body.loggedBy, 'loggedBy', 200, errors)
     maxLength(body.notes, 'notes', 2000, errors)
     maxLength(body.reason, 'reason', 1000, errors)
+
+    // Re-scoping an expense's location: if any of the three scope fields
+    // are part of this edit, resolve the full ancestry server-side from
+    // whichever one is deepest (same as create) and overwrite all three in
+    // `body`, so the generic field loop below writes a consistent triple
+    // instead of trusting a client-asserted combination.
+    if ('locationId' in body || 'areaId' in body || 'listingId' in body) {
+      try {
+        const scope = await resolveExpenseScope({
+          locationId: body.locationId,
+          areaId: body.areaId,
+          listingId: body.listingId,
+        })
+        body.locationId = scope.locationId
+        body.areaId = scope.areaId
+        body.listingId = scope.listingId
+      } catch (scopeErr) {
+        if (scopeErr?.field) errors[scopeErr.field] = scopeErr.message
+        else throw scopeErr
+      }
+    }
+
     if (Object.keys(errors).length > 0) {
       return res.status(400).json({ error: 'Validation failed', fields: errors })
     }

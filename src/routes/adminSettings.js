@@ -25,9 +25,9 @@ router.get('/', async (req, res, next) => {
 })
 
 function validateValue(key, value) {
-  if (key === 'notify_emails') {
+  if (['notify_emails', 'daily_digest_emails', 'weekly_digest_emails', 'monthly_digest_emails'].includes(key)) {
     if (!Array.isArray(value) || value.some((v) => typeof v !== 'string' || !isValidEmail(v))) {
-      return 'notify_emails must be a list of valid email addresses.'
+      return `${key} must be a list of valid email addresses.`
     }
   } else if (key === 'expense_categories' || key === 'payment_methods') {
     if (!Array.isArray(value) || value.length === 0 || value.some((v) => typeof v !== 'string' || !v.trim())) {

@@ -15,6 +15,13 @@ export const SETTING_DEFAULTS = {
   // still override it per booking, and it's never recomputed on edit, same
   // as the discount field itself.
   default_discount_per_night: 0,
+  // Per-digest recipient lists (2026-09-20) — each empty by default, in
+  // which case scheduledReports.js falls back to notify_emails so delivery
+  // doesn't silently stop on a fresh deploy before a super admin has set
+  // these explicitly.
+  daily_digest_emails: [],
+  weekly_digest_emails: [],
+  monthly_digest_emails: [],
 }
 
 export async function getSetting(key) {

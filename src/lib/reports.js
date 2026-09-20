@@ -1,18 +1,20 @@
 import { pool } from '../db.js'
 import { isValidDate } from './validate.js'
-import { locationCondition, locationLabelSql } from './location.js'
+import { hierarchyFilterCondition } from './hierarchy.js'
 
 // Shared by GET /admin/reports/summary (JSON, used by SummaryTab), the PDF
 // export, and the daily/weekly/monthly email digests — one query set, three
 // consumers, instead of three copies of this SQL drifting apart over time.
-export async function buildSummaryReport({ startDate, endDate, location } = {}) {
+export async function buildSummaryReport({ startDate, endDate, locationFilter } = {}) {
   // The report is scoped by stay date (check_in), not booking-creation
   // date, so "revenue for March" means stays checking in during March —
   // matching how the calendar/availability views already think about
-  // dates. Both bounds are optional and independent. `location` (one of
-  // 'ikeja' | 'gbagada' | 'abeokuta') is optional too — every query below
-  // joins listings and shares this same condition set, so filtering by
-  // location is consistent across every stat and breakdown.
+  // dates. Both bounds are optional and independent. `locationFilter` (from
+  // lib/hierarchy.js's parseLocationFilter — { level: 'location'|'area'|
+  // 'unit', id }) is optional too — every query below joins listings and
+  // shares this same condition set, so filtering by location is consistent
+  // across every stat and breakdown, and can now scope to any depth
+  // instead of only the old 3 hardcoded buckets.
   const bookingParams = []
   const bookingConditions = []
   if (isValidDate(startDate)) {
@@ -23,7 +25,7 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
     bookingParams.push(endDate)
     bookingConditions.push(`b.check_in <= $${bookingParams.length}`)
   }
-  const bookingLocationCond = locationCondition(location, bookingParams, 'l')
+  const bookingLocationCond = hierarchyFilterCondition(locationFilter, bookingParams, { table: 'bookings', alias: 'l' })
   if (bookingLocationCond) bookingConditions.push(bookingLocationCond)
   const bookingWhere = bookingConditions.length ? `where ${bookingConditions.join(' and ')}` : ''
   const bookingWhereAnd = bookingConditions.length ? `and ${bookingConditions.join(' and ')}` : ''
@@ -38,9 +40,11 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
     expenseParams.push(endDate)
     expenseConditions.push(`e.expense_date <= $${expenseParams.length}`)
   }
-  // A general expense (no listing_id) has no location, so it's correctly
-  // excluded whenever a specific location filter is active.
-  const expenseLocationCond = locationCondition(location, expenseParams, 'l')
+  // Expenses carry their own location_id/area_id/listing_id directly (see
+  // the 2026-09-20 migration) — no join needed, and unlike the old
+  // city/neighborhood join this correctly includes location- and
+  // area-general expenses that have no listing_id at all.
+  const expenseLocationCond = hierarchyFilterCondition(locationFilter, expenseParams, { table: 'expenses', alias: 'e' })
   if (expenseLocationCond) expenseConditions.push(expenseLocationCond)
   const expenseWhere = `where ${expenseConditions.join(' and ')}`
 
@@ -61,15 +65,34 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
     bookingParams,
   )
 
+  // Both location-level totals (e.g. "Lagos" = all its bookings, areas
+  // included) and area-level subtotals (e.g. "Ikeja" on its own) as
+  // separate rows in one flat list — the location row is not a sum of the
+  // area rows client-side, each is its own independent group-by so a
+  // location with no areas (Abeokuta) still reports correctly.
   const { rows: byLocation } = await pool.query(
-    `select ${locationLabelSql('l')} as location,
+    `select loc.name as location,
            coalesce(sum(b.total_amount), 0) as revenue,
            coalesce(sum(b.amount_paid), 0) as collected,
            count(*) as bookings
     from bookings b
     join listings l on l.id = b.listing_id
+    join locations loc on loc.id = l.location_id
     where b.status != 'cancelled' ${bookingWhereAnd}
-    group by location
+    group by loc.id, loc.name
+
+    union all
+
+    select ar.name as location,
+           coalesce(sum(b.total_amount), 0) as revenue,
+           coalesce(sum(b.amount_paid), 0) as collected,
+           count(*) as bookings
+    from bookings b
+    join listings l on l.id = b.listing_id
+    join areas ar on ar.id = l.area_id
+    where b.status != 'cancelled' ${bookingWhereAnd}
+    group by ar.id, ar.name
+
     order by location`,
     bookingParams,
   )
@@ -97,13 +120,14 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
   )
 
   const { rows: bySourceByLocation } = await pool.query(
-    `select ${locationLabelSql('l')} as location,
+    `select loc.name as location,
            coalesce(b.source_channel, 'Unspecified') as source_channel,
            count(*) as bookings
     from bookings b
     join listings l on l.id = b.listing_id
+    join locations loc on loc.id = l.location_id
     where b.status != 'cancelled' ${bookingWhereAnd}
-    group by location, source_channel
+    group by loc.id, loc.name, source_channel
     order by location, bookings desc`,
     bookingParams,
   )
@@ -195,12 +219,27 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
     expenseParams,
   )
 
+  // location_id/area_id live directly on expenses now, so no listings join
+  // is needed — and unlike the old city/neighborhood join, this correctly
+  // includes location- and area-general expenses (no listing_id at all).
+  // The 41 pre-migration "General" rows (location_id also null) have no
+  // recoverable location and are intentionally excluded here rather than
+  // guessed at — see the 2026-09-20 schema migration note.
   const { rows: expenseByLocation } = await pool.query(
-    `select ${locationLabelSql('l')} as location, coalesce(sum(e.amount), 0) as amount
+    `select loc.name as location, coalesce(sum(e.amount), 0) as amount
     from expenses e
-    left join listings l on l.id = e.listing_id
+    join locations loc on loc.id = e.location_id
     ${expenseWhere}
-    group by location
+    group by loc.id, loc.name
+
+    union all
+
+    select ar.name as location, coalesce(sum(e.amount), 0) as amount
+    from expenses e
+    join areas ar on ar.id = e.area_id
+    ${expenseWhere}
+    group by ar.id, ar.name
+
     order by amount desc`,
     expenseParams,
   )
@@ -253,7 +292,7 @@ export async function buildSummaryReport({ startDate, endDate, location } = {}) 
   return {
     startDate: startDate || null,
     endDate: endDate || null,
-    location: location || null,
+    location: locationFilter || null,
     totalRevenue: Number(totals[0].total_revenue),
     totalCollected,
     totalOutstanding: Number(totals[0].total_outstanding),

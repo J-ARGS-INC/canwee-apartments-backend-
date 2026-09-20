@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../db.js'
 import { isValidDate } from '../lib/validate.js'
-import { locationCondition, locationLabelSql } from '../lib/location.js'
+import { hierarchyFilterCondition, parseLocationFilter, getLocationTree } from '../lib/hierarchy.js'
 
 // Deliberately NOT gated by requireAdmin — the owner asked for a
 // no-login analytics view, reachable only by knowing its obscure frontend
@@ -12,9 +12,22 @@ import { locationCondition, locationLabelSql } from '../lib/location.js'
 // the super admin's Payment Summary tab is.
 const router = Router()
 
+// Same tree as GET /api/admin/locations, unauthenticated like the rest of
+// this router — it's just names/ids (no financial data), needed so this
+// page's own location filter can offer the full Location -> Area -> Unit
+// hierarchy without requiring an admin login.
+router.get('/locations', async (req, res, next) => {
+  try {
+    res.json(await getLocationTree())
+  } catch (err) {
+    next(err)
+  }
+})
+
 router.get('/summary', async (req, res, next) => {
   try {
     const { startDate, endDate, location } = req.query
+    const locationFilter = parseLocationFilter(location)
 
     const bookingParams = []
     const bookingConditions = ["b.status != 'cancelled'"]
@@ -26,7 +39,7 @@ router.get('/summary', async (req, res, next) => {
       bookingParams.push(endDate)
       bookingConditions.push(`b.booking_date <= $${bookingParams.length}`)
     }
-    const bookingLocationCond = locationCondition(location, bookingParams, 'l')
+    const bookingLocationCond = hierarchyFilterCondition(locationFilter, bookingParams, { table: 'bookings', alias: 'l' })
     if (bookingLocationCond) bookingConditions.push(bookingLocationCond)
     const bookingWhere = `where ${bookingConditions.join(' and ')}`
 
@@ -40,7 +53,7 @@ router.get('/summary', async (req, res, next) => {
       expenseParams.push(endDate)
       expenseConditions.push(`e.expense_date <= $${expenseParams.length}`)
     }
-    const expenseLocationCond = locationCondition(location, expenseParams, 'l')
+    const expenseLocationCond = hierarchyFilterCondition(locationFilter, expenseParams, { table: 'expenses', alias: 'e' })
     if (expenseLocationCond) expenseConditions.push(expenseLocationCond)
     const expenseWhere = `where ${expenseConditions.join(' and ')}`
 
@@ -59,23 +72,37 @@ router.get('/summary', async (req, res, next) => {
     const { rows: expenseRows } = await pool.query(
       `select coalesce(sum(e.amount), 0) as expenses
       from expenses e
-      left join listings l on l.id = e.listing_id
       ${expenseWhere}`,
       expenseParams,
     )
 
     // "Which location is making more money" — the owner's actual ask.
-    // Same shape as the super admin's byLocation breakdown, sorted by
-    // collected revenue so the top earner is always first.
+    // Same shape as the super admin's byLocation breakdown (location- and
+    // area-level rows both included), sorted by collected revenue so the
+    // top earner is always first.
     const { rows: byLocation } = await pool.query(
-      `select ${locationLabelSql('l')} as location,
+      `select loc.name as location,
         count(*) as bookings,
         coalesce(sum(b.total_amount), 0) as revenue,
         coalesce(sum(b.amount_paid), 0) as collected
       from bookings b
       join listings l on l.id = b.listing_id
+      join locations loc on loc.id = l.location_id
       ${bookingWhere}
-      group by location
+      group by loc.id, loc.name
+
+      union all
+
+      select ar.name as location,
+        count(*) as bookings,
+        coalesce(sum(b.total_amount), 0) as revenue,
+        coalesce(sum(b.amount_paid), 0) as collected
+      from bookings b
+      join listings l on l.id = b.listing_id
+      join areas ar on ar.id = l.area_id
+      ${bookingWhere}
+      group by ar.id, ar.name
+
       order by collected desc`,
       bookingParams,
     )
@@ -101,7 +128,7 @@ router.get('/summary', async (req, res, next) => {
     // stats — but it does respect the location filter, so picking a
     // location shows only that location's rooms.
     const roomParams = []
-    const roomLocationCond = locationCondition(location, roomParams, 'l')
+    const roomLocationCond = hierarchyFilterCondition(locationFilter, roomParams, { table: 'listings', alias: 'l' })
     const roomWhere = roomLocationCond ? `where ${roomLocationCond}` : ''
 
     const { rows: roomRows } = await pool.query(

@@ -1,5 +1,6 @@
 import cron from 'node-cron'
 import { sendDailyDigest, sendWeeklyDigest, sendMonthlyReport } from './lib/scheduledReports.js'
+import { runAutoStatusTransitions } from './lib/autoStatusTransitions.js'
 
 const TIMEZONE = 'Africa/Lagos'
 
@@ -23,5 +24,8 @@ export function startScheduledReports() {
   cron.schedule('0 22 * * *', safeRun('daily digest (night)', sendDailyDigest), { timezone: TIMEZONE })
   cron.schedule('0 22 * * 6', safeRun('weekly digest', sendWeeklyDigest), { timezone: TIMEZONE })
   cron.schedule('0 8 1 * *', safeRun('monthly report', sendMonthlyReport), { timezone: TIMEZONE })
+  // Just after midnight, so a booking's check-in/check-out date has fully
+  // "arrived" in Lagos local time before it's auto-progressed.
+  cron.schedule('5 0 * * *', safeRun('auto status transitions', runAutoStatusTransitions), { timezone: TIMEZONE })
   console.log('[cron] Scheduled reports armed (daily 12pm & 10pm, weekly Sat 10pm, monthly 1st 8am, Africa/Lagos).')
 }

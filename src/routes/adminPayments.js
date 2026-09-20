@@ -7,7 +7,7 @@ import { idempotent } from '../middleware/idempotency.js'
 import { isValidDate, maxLength } from '../lib/validate.js'
 import { logAudit } from '../lib/auditLog.js'
 import { derivePaymentStatus } from '../lib/paymentStatus.js'
-import { locationCondition } from '../lib/location.js'
+import { hierarchyFilterCondition, parseLocationFilter } from '../lib/hierarchy.js'
 
 const router = Router()
 
@@ -89,7 +89,7 @@ router.get('/payments', requireSuperAdmin, async (req, res, next) => {
       params.push(listingId)
       conditions.push(`b.listing_id = $${params.length}`)
     }
-    const locationCond = locationCondition(location, params, 'l')
+    const locationCond = hierarchyFilterCondition(parseLocationFilter(location), params, { table: 'bookings', alias: 'l' })
     if (locationCond) conditions.push(locationCond)
     if (isValidDate(startDate)) {
       params.push(startDate)

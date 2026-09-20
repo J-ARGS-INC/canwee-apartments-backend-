@@ -517,7 +517,15 @@ router.patch('/bookings/:id', async (req, res, next) => {
         // (see GET/PATCH /admin/checkouts/owing). The real balance comes
         // from the row just locked, never a client-supplied value.
         const owesMoney = transition.to === 'checked_out' && Number(locked[0].balance) > 0
-        if (owesMoney && (typeof reason !== 'string' || !reason.trim())) {
+        // A regular admin cancelling a booking must record why — a super
+        // admin doesn't need to justify it, matching how requireSuperAdmin
+        // gates are used elsewhere in this app (full authority, no extra
+        // friction). If a super admin does supply a reason anyway, it's
+        // still recorded (optional-but-kept), same as any other action.
+        const isCancel = transition.to === 'cancelled'
+        const cancelReasonRequired = isCancel && req.adminRole !== 'super_admin'
+        const hasReason = typeof reason === 'string' && reason.trim()
+        if (owesMoney && !hasReason) {
           await client.query('ROLLBACK')
           result = {
             status: 400,
@@ -526,16 +534,28 @@ router.patch('/bookings/:id', async (req, res, next) => {
               fields: { reason: 'A reason is required to check out a guest with an outstanding balance.' },
             },
           }
+        } else if (cancelReasonRequired && !hasReason) {
+          await client.query('ROLLBACK')
+          result = {
+            status: 400,
+            body: {
+              error: 'Enter a reason for cancelling this booking.',
+              fields: { reason: 'A reason is required to cancel a booking.' },
+            },
+          }
         } else {
           const previousStatus = locked[0].status
+          const recordCancelReason = isCancel && hasReason
           const { rows: updated } = await client.query(
             `update bookings
              set status = $1, updated_at = now()${timestampColumn ? `, ${timestampColumn} = now()` : ''}
                  ${owesMoney ? ', checkout_reason = $3, checked_out_by = $4' : ''}
+                 ${recordCancelReason ? ', cancellation_reason = $3, cancelled_by = $4, cancelled_at = now()' : ''}
              where id = $2
              returning id, status, actual_check_in_at, actual_check_out_at, updated_at,
-                       checkout_reason, checked_out_by, checkout_reviewed_by, checkout_reviewed_at`,
-            owesMoney ? [transition.to, id, reason.trim(), req.adminId] : [transition.to, id],
+                       checkout_reason, checked_out_by, checkout_reviewed_by, checkout_reviewed_at,
+                       cancellation_reason, cancelled_by, cancelled_at`,
+            owesMoney || recordCancelReason ? [transition.to, id, reason.trim(), req.adminId] : [transition.to, id],
           )
           await client.query('COMMIT')
 
@@ -546,9 +566,10 @@ router.patch('/bookings/:id', async (req, res, next) => {
             changes: {
               status: { old: previousStatus, new: transition.to },
               ...(owesMoney ? { checkoutReason: { old: null, new: reason.trim() } } : {}),
+              ...(recordCancelReason ? { cancellationReason: { old: null, new: reason.trim() } } : {}),
             },
             actor: req.adminId,
-            reason: owesMoney ? reason.trim() : undefined,
+            reason: owesMoney || recordCancelReason ? reason.trim() : undefined,
           })
 
           result = { status: 200, body: updated[0] }

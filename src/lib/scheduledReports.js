@@ -1,6 +1,6 @@
 import { pool } from '../db.js'
 import { buildSummaryReport } from './reports.js'
-import { sendNotificationEmail } from './notify.js'
+import { sendEmailTo, getDigestRecipients } from './notify.js'
 import { dailyDigestEmail, weeklyDigestEmail, monthlyReportEmail } from './emailTemplates.js'
 
 const ADMIN_DASHBOARD_URL = process.env.ADMIN_DASHBOARD_URL || process.env.FRONTEND_URL || 'https://canweeapartments.com'
@@ -26,31 +26,69 @@ async function fetchStays(condition, params = []) {
 // mirrors the "Right now" tiles on the dashboard, but pushed to email
 // instead of requiring someone to open the admin area.
 export async function sendDailyDigest() {
-  const [checkInsToday, checkOutsToday, checkedInNow, upcomingCheckIns, upcomingCheckOuts, unpaidReserved] = await Promise.all([
-    fetchStays("status in ('pending','confirmed') and check_in = current_date"),
-    fetchStays("status = 'checked_in' and check_out = current_date"),
-    fetchStays("status = 'checked_in'"),
-    fetchStays("status in ('pending','confirmed') and check_in > current_date and check_in <= current_date + interval '2 days'"),
-    fetchStays("status = 'checked_in' and check_out > current_date and check_out <= current_date + interval '2 days'"),
-    fetchStays("status in ('pending','confirmed') and payment_status in ('unpaid','part_payment')"),
-  ])
+  const [checkInsToday, checkOutsToday, checkedInNow, upcomingCheckIns, upcomingCheckOuts, unpaidReserved, overduePending] =
+    await Promise.all([
+      fetchStays("status in ('pending','confirmed') and check_in = current_date"),
+      fetchStays("status = 'checked_in' and check_out = current_date"),
+      fetchStays("status = 'checked_in'"),
+      // 7 days, not 48h — keeps the "Upcoming" section operational without
+      // being so short it misses next week's prep, per the operator's
+      // explicit call for 7 over a longer window.
+      fetchStays("status in ('pending','confirmed') and check_in > current_date and check_in <= current_date + interval '7 days'"),
+      fetchStays("status = 'checked_in' and check_out > current_date and check_out <= current_date + interval '7 days'"),
+      fetchStays("status in ('pending','confirmed') and payment_status in ('unpaid','part_payment')"),
+      // Never auto-progressed by the nightly cron (see autoStatusTransitions.js)
+      // — surfaced here so it doesn't just sit invisible in the admin UI.
+      fetchStays("status = 'pending' and check_in < current_date"),
+    ])
 
-  const upcoming48h = [
+  const upcoming7d = [
     ...upcomingCheckIns.map((b) => ({ ...b, kind: 'check-in', date: b.check_in })),
     ...upcomingCheckOuts.map((b) => ({ ...b, kind: 'check-out', date: b.check_out })),
   ]
 
+  const [{ rows: unitCountRows }, { rows: expenseRows }, { rows: paymentRows }] = await Promise.all([
+    pool.query('select count(*)::int as n from listings'),
+    pool.query(
+      `select
+        coalesce(sum(amount) filter (where expense_date = current_date - 1), 0) as yesterday,
+        coalesce(sum(amount) filter (where expense_date = current_date), 0) as today
+       from expenses where deleted_at is null`,
+    ),
+    // "Amount expected today" = today's stays' total_amount; "received
+    // today" = payments actually logged today (payment_date, not
+    // booking-creation date) — two different things worth showing side by
+    // side rather than conflating.
+    pool.query(
+      `select
+        coalesce(sum(total_amount) filter (where check_in = current_date and status != 'cancelled'), 0) as expected_today,
+        (select coalesce(sum(amount), 0) from payments where payment_date = current_date) as received_today
+       from bookings`,
+    ),
+  ])
+  const totalUnits = unitCountRows[0].n
+  const occupiedCount = checkedInNow.length
+  const availableCount = Math.max(0, totalUnits - occupiedCount)
+
   const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
 
-  await sendNotificationEmail({
+  await sendEmailTo(await getDigestRecipients('daily_digest_emails'), {
     subject: `Daily digest: ${checkInsToday.length} check-in(s), ${checkOutsToday.length} check-out(s) today`,
     html: dailyDigestEmail({
       dateLabel,
       checkInsToday,
       checkOutsToday,
       checkedInNow,
-      upcoming48h,
+      occupiedCount,
+      availableCount,
+      totalUnits,
+      upcoming7d,
       unpaidReserved,
+      overduePending,
+      expectedToday: Number(paymentRows[0].expected_today),
+      receivedToday: Number(paymentRows[0].received_today),
+      expensesYesterday: Number(expenseRows[0].yesterday),
+      expensesToday: Number(expenseRows[0].today),
       dashboardUrl: ADMIN_DASHBOARD_URL,
     }),
   })
@@ -91,9 +129,24 @@ export async function sendWeeklyDigest() {
     [startDate, endDate],
   )
 
+  // Who cancelled and why, for the week — uses the mandatory-reason
+  // cancellation columns added for non-super-admin cancellations; a super
+  // admin's own cancellation may have no reason, shown as such.
+  const { rows: cancellations } = await pool.query(
+    `select b.booking_code, b.full_name, b.cancellation_reason, au.display_name as cancelled_by_name
+     from bookings b left join admin_users au on au.id = b.cancelled_by
+     where b.status = 'cancelled' and b.cancelled_at::date between $1 and $2
+     order by b.cancelled_at`,
+    [startDate, endDate],
+  )
+
+  const upcoming7dRows = await fetchStays(
+    "status in ('pending','confirmed') and check_in > current_date and check_in <= current_date + interval '7 days'",
+  )
+
   const weekLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
 
-  await sendNotificationEmail({
+  await sendEmailTo(await getDigestRecipients('weekly_digest_emails'), {
     subject: `Weekly summary: ${weekLabel}`,
     html: weeklyDigestEmail({
       weekLabel,
@@ -102,6 +155,8 @@ export async function sendWeeklyDigest() {
       checkOutsCompleted: Number(activity[0].check_outs_completed),
       cancelledCount: Number(activity[0].cancelled_count),
       noShowCount: Number(activity[0].no_show_count),
+      cancellations,
+      upcoming7d: upcoming7dRows,
       dashboardUrl: ADMIN_DASHBOARD_URL,
     }),
   })
@@ -116,21 +171,68 @@ export async function sendMonthlyReport() {
   const startDate = toDateKey(monthStart)
   const endDate = toDateKey(monthEnd)
 
-  const report = await buildSummaryReport({ startDate, endDate })
+  const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 2, 1)
+  const prevMonthEnd = new Date(now.getFullYear(), now.getMonth() - 1, 0)
 
-  const { rows: paymentRows } = await pool.query(
-    `select payment_status, count(*) as bookings
-     from bookings
-     where status != 'cancelled' and check_in >= $1 and check_in <= $2
-     group by payment_status`,
-    [startDate, endDate],
-  )
+  const [report, previousReport] = await Promise.all([
+    buildSummaryReport({ startDate, endDate }),
+    buildSummaryReport({ startDate: toDateKey(prevMonthStart), endDate: toDateKey(prevMonthEnd) }),
+  ])
+
+  const [{ rows: paymentRows }, { rows: statsRows }, { rows: expenseByListingRows }, { rows: unitCountRows }, upcomingNextMonth] =
+    await Promise.all([
+      pool.query(
+        `select payment_status, count(*) as bookings
+         from bookings
+         where status != 'cancelled' and check_in >= $1 and check_in <= $2
+         group by payment_status`,
+        [startDate, endDate],
+      ),
+      pool.query(
+        `select
+          count(*) filter (where status = 'cancelled' and cancelled_at::date between $1 and $2) as cancellation_count,
+          coalesce(avg(check_out - check_in) filter (where status != 'cancelled' and check_in between $1 and $2), 0) as avg_nights,
+          coalesce(sum(check_out - check_in) filter (where status != 'cancelled' and check_in between $1 and $2), 0) as occupied_nights
+         from bookings`,
+        [startDate, endDate],
+      ),
+      // Per-unit expenses — distinct from report.expenseByLocation, which
+      // is location/area-scoped only. Rows with no listing_id (a location-
+      // or area-general expense) are intentionally excluded here, same
+      // reasoning as expenseByLocation excluding the pre-migration
+      // unclassified rows: this section answers "which apartment", not
+      // "which broader area".
+      pool.query(
+        `select l.title, l.unit_code, coalesce(sum(e.amount), 0) as amount
+         from expenses e join listings l on l.id = e.listing_id
+         where e.deleted_at is null and e.expense_date >= $1 and e.expense_date <= $2
+         group by l.id, l.title, l.unit_code
+         order by amount desc`,
+        [startDate, endDate],
+      ),
+      pool.query('select count(*)::int as n from listings'),
+      fetchStays(`status in ('pending','confirmed') and check_in >= date_trunc('month', current_date)::date and check_in < (date_trunc('month', current_date) + interval '1 month')::date`),
+    ])
   const paymentStatusCounts = Object.fromEntries(paymentRows.map((r) => [r.payment_status, Number(r.bookings)]))
+  const daysInMonth = Math.round((monthEnd - monthStart) / (1000 * 60 * 60 * 24)) + 1
+  const totalUnits = unitCountRows[0].n
+  const occupancyRate = totalUnits > 0 ? (Number(statsRows[0].occupied_nights) / (totalUnits * daysInMonth)) * 100 : 0
 
   const monthLabel = monthStart.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
 
-  await sendNotificationEmail({
+  await sendEmailTo(await getDigestRecipients('monthly_digest_emails'), {
     subject: `Monthly report: ${monthLabel}`,
-    html: monthlyReportEmail({ monthLabel, report, paymentStatusCounts, dashboardUrl: ADMIN_DASHBOARD_URL }),
+    html: monthlyReportEmail({
+      monthLabel,
+      report,
+      previousReport,
+      paymentStatusCounts,
+      cancellationCount: Number(statsRows[0].cancellation_count),
+      averageLengthOfStay: Number(statsRows[0].avg_nights),
+      occupancyRate,
+      expenseByListing: expenseByListingRows,
+      upcomingNextMonth,
+      dashboardUrl: ADMIN_DASHBOARD_URL,
+    }),
   })
 }

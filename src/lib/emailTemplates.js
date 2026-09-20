@@ -164,13 +164,37 @@ function sectionHeading(text) {
   return `<p style="margin:24px 0 8px;font-size:13px;font-weight:700;color:${COLORS.ink};">${escapeHtml(text)}</p>`
 }
 
-export function dailyDigestEmail({ dateLabel, checkInsToday, checkOutsToday, checkedInNow, upcoming48h, unpaidReserved, dashboardUrl }) {
+export function dailyDigestEmail({
+  dateLabel,
+  checkInsToday,
+  checkOutsToday,
+  checkedInNow,
+  occupiedCount,
+  availableCount,
+  totalUnits,
+  upcoming7d,
+  unpaidReserved,
+  overduePending,
+  expectedToday,
+  receivedToday,
+  expensesYesterday,
+  expensesToday,
+  dashboardUrl,
+}) {
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
   const stayLine = (b) => `<strong>${escapeHtml(b.full_name)}</strong> &middot; ${escapeHtml(b.listing_title)} (${escapeHtml(b.unit_code || b.listing_city)}) &middot; <span style="font-family:monospace;">${escapeHtml(b.booking_code)}</span>`
-  const balanceLine = (b) => `${stayLine(b)} &middot; balance ${b.balance}`
+  const balanceLine = (b) => `${stayLine(b)} &middot; balance ${money(b.balance)}`
 
   return shell(`
     <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Daily operations digest</p>
     <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(dateLabel)}</p>
+
+    ${summaryTable([
+      ['Occupied apartments', `${occupiedCount} of ${totalUnits}`],
+      ['Available apartments', String(availableCount)],
+      ['Expected today', money(expectedToday)],
+      ['Received today', money(receivedToday)],
+    ])}
 
     ${sectionHeading(`Checking in today (${checkInsToday.length})`)}
     ${bulletList(checkInsToday.map(stayLine))}
@@ -181,11 +205,17 @@ export function dailyDigestEmail({ dateLabel, checkInsToday, checkOutsToday, che
     ${sectionHeading(`Currently checked in (${checkedInNow.length})`)}
     ${bulletList(checkedInNow.map(stayLine))}
 
-    ${sectionHeading(`Upcoming within 48 hours (${upcoming48h.length})`)}
-    ${bulletList(upcoming48h.map((b) => `${stayLine(b)} &middot; ${escapeHtml(b.kind)} ${escapeHtml(b.date)}`))}
+    ${sectionHeading(`Upcoming within 7 days (${upcoming7d.length})`)}
+    ${bulletList(upcoming7d.map((b) => `${stayLine(b)} &middot; ${escapeHtml(b.kind)} ${escapeHtml(b.date)} &middot; ${money(b.balance != null ? Number(b.balance) : 0)} owing`))}
 
-    ${sectionHeading(`Needs a payment follow-up (${unpaidReserved.length})`)}
+    ${sectionHeading(`Guests currently owing (${unpaidReserved.length})`)}
     ${bulletList(unpaidReserved.map(balanceLine))}
+
+    ${overduePending.length > 0 ? sectionHeading(`Needs confirmation — check-in date passed (${overduePending.length})`) : ''}
+    ${overduePending.length > 0 ? bulletList(overduePending.map(stayLine)) : ''}
+
+    ${sectionHeading('Expenses')}
+    ${bulletList([`Yesterday: ${money(expensesYesterday)}`, `Today so far: ${money(expensesToday)}`])}
 
     <p style="text-align:center;margin:24px 0 0;">
       ${ctaButton(dashboardUrl, 'Open admin dashboard')}
@@ -193,17 +223,30 @@ export function dailyDigestEmail({ dateLabel, checkInsToday, checkOutsToday, che
   `)
 }
 
-export function weeklyDigestEmail({ weekLabel, report, checkInsCompleted, checkOutsCompleted, cancelledCount, noShowCount, dashboardUrl }) {
+export function weeklyDigestEmail({
+  weekLabel,
+  report,
+  checkInsCompleted,
+  checkOutsCompleted,
+  cancelledCount,
+  noShowCount,
+  cancellations,
+  upcoming7d,
+  dashboardUrl,
+}) {
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
   const topUnit = report.topListings[0]
   const bottomUnit = report.bottomListings[0]
+  const stayLine = (b) => `<strong>${escapeHtml(b.full_name)}</strong> &middot; ${escapeHtml(b.listing_title)} (${escapeHtml(b.unit_code || b.listing_city)}) &middot; ${escapeHtml(b.check_in)}`
+
   return shell(`
     <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Weekly operations summary</p>
     <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(weekLabel)}</p>
     ${summaryTable([
       ['Total bookings', String(report.totalBookings)],
-      ['Revenue collected', `&#8358;${Math.round(report.totalCollected).toLocaleString('en-US')}`],
-      ['Outstanding balance', `&#8358;${Math.round(report.totalOutstanding).toLocaleString('en-US')}`],
-      ['Expenses recorded', `&#8358;${Math.round(report.totalExpenses).toLocaleString('en-US')}`],
+      ['Revenue collected', money(report.totalCollected)],
+      ['Outstanding balance', money(report.totalOutstanding)],
+      ['Expenses recorded', money(report.totalExpenses)],
       ['Check-ins completed', String(checkInsCompleted)],
       ['Check-outs completed', String(checkOutsCompleted)],
       ['Cancelled', String(cancelledCount)],
@@ -211,33 +254,80 @@ export function weeklyDigestEmail({ weekLabel, report, checkInsCompleted, checkO
       ...(topUnit ? [['Highest booked unit', `${escapeHtml(topUnit.title)} (${escapeHtml(topUnit.unitCode || topUnit.city)})`]] : []),
       ...(bottomUnit ? [['Lowest activity unit', `${escapeHtml(bottomUnit.title)} (${escapeHtml(bottomUnit.unitCode || bottomUnit.city)})`]] : []),
     ])}
+
+    ${sectionHeading('Bookings by location')}
+    ${bulletList(report.byLocation.map((r) => `${escapeHtml(r.location)}: ${r.bookings} bookings &middot; ${money(r.collected)}`))}
+
+    ${sectionHeading('Expenses by location')}
+    ${bulletList(report.expenseByLocation.map((r) => `${escapeHtml(r.location)}: ${money(r.amount)}`))}
+
+    ${cancellations.length > 0 ? sectionHeading(`Cancellations this week (${cancellations.length})`) : ''}
+    ${cancellations.length > 0 ? bulletList(cancellations.map((c) => `<span style="font-family:monospace;">${escapeHtml(c.booking_code)}</span> &middot; ${escapeHtml(c.full_name)} &middot; by ${escapeHtml(c.cancelled_by_name || 'super admin')}${c.cancellation_reason ? ` &mdash; ${escapeHtml(c.cancellation_reason)}` : ''}`)) : ''}
+
+    ${sectionHeading(`Upcoming check-ins, next 7 days (${upcoming7d.length})`)}
+    ${bulletList(upcoming7d.map(stayLine))}
+
     <p style="text-align:center;margin:0;">
       ${ctaButton(dashboardUrl, 'Open full dashboard')}
     </p>
   `)
 }
 
-export function monthlyReportEmail({ monthLabel, report, paymentStatusCounts, dashboardUrl }) {
+// Shows the change vs. last month inline, e.g. "+12% vs last month" in
+// green/red — skipped (returns just the current value) when the previous
+// month has nothing to compare against (division by zero).
+function withMomChange(current, previous, formatter) {
+  const formatted = formatter(current)
+  if (!previous) return formatted
+  const change = ((current - previous) / previous) * 100
+  const color = change >= 0 ? COLORS.success : '#DC2626'
+  const sign = change >= 0 ? '+' : ''
+  return `${formatted} <span style="color:${color};font-weight:700;">(${sign}${change.toFixed(0)}% vs last month)</span>`
+}
+
+export function monthlyReportEmail({
+  monthLabel,
+  report,
+  previousReport,
+  paymentStatusCounts,
+  cancellationCount,
+  averageLengthOfStay,
+  occupancyRate,
+  expenseByListing,
+  upcomingNextMonth,
+  dashboardUrl,
+}) {
   const topUnit = report.topListings[0]
   const bottomUnit = report.bottomListings[0]
   const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
+  const stayLine = (b) => `<strong>${escapeHtml(b.full_name)}</strong> &middot; ${escapeHtml(b.listing_title)} (${escapeHtml(b.unit_code || b.listing_city)}) &middot; ${escapeHtml(b.check_in)}`
 
   return shell(`
     <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Monthly business report</p>
     <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(monthLabel)}</p>
     ${summaryTable([
       ['Total bookings', String(report.totalBookings)],
-      ['Total revenue', money(report.totalRevenue)],
-      ['Total collected', money(report.totalCollected)],
+      ['Total revenue', withMomChange(report.totalRevenue, previousReport.totalRevenue, money)],
+      ['Total collected', withMomChange(report.totalCollected, previousReport.totalCollected, money)],
       ['Outstanding balance', money(report.totalOutstanding)],
-      ['Total expenses', money(report.totalExpenses)],
-      ['Net profit', money(report.netIncome)],
+      ['Total expenses', withMomChange(report.totalExpenses, previousReport.totalExpenses, money)],
+      ['Net profit (before salaries/other deductions)', withMomChange(report.netIncome, previousReport.netIncome, money)],
+      ['Occupancy rate', `${occupancyRate.toFixed(0)}%`],
+      ['Average booking value', money(report.averageBookingValue)],
+      ['Average length of stay', `${averageLengthOfStay.toFixed(1)} night${averageLengthOfStay === 1 ? '' : 's'}`],
+      ['Cancellations', String(cancellationCount)],
       ...(topUnit ? [['Best-performing unit', `${escapeHtml(topUnit.title)} (${escapeHtml(topUnit.unitCode || topUnit.city)}) &mdash; ${money(topUnit.collected)}`]] : []),
       ...(bottomUnit ? [['Least-performing unit', `${escapeHtml(bottomUnit.title)} (${escapeHtml(bottomUnit.unitCode || bottomUnit.city)}) &mdash; ${money(bottomUnit.collected)}`]] : []),
     ])}
 
     ${sectionHeading('Revenue by location')}
     ${bulletList(report.byLocation.map((r) => `${escapeHtml(r.location)}: ${money(r.collected)}`))}
+
+    ${sectionHeading('Expenses by location')}
+    ${bulletList(report.expenseByLocation.map((r) => `${escapeHtml(r.location)}: ${money(r.amount)}`))}
+
+    ${sectionHeading('Expenses by individual apartment')}
+    ${bulletList(expenseByListing.map((r) => `${escapeHtml(r.title)} (${escapeHtml(r.unit_code || '')}): ${money(r.amount)}`))}
 
     ${sectionHeading('Expenses by category')}
     ${bulletList(report.expenseByCategory.map((r) => `${escapeHtml(r.category)}: ${money(r.amount)} (${r.percent.toFixed(0)}%)`))}
@@ -251,6 +341,9 @@ export function monthlyReportEmail({ monthLabel, report, paymentStatusCounts, da
 
     ${sectionHeading('Booking outcomes')}
     ${bulletList(report.byStatus.map((r) => `${escapeHtml(r.status.replace('_', ' '))}: ${r.bookings}`))}
+
+    ${sectionHeading(`Upcoming bookings for ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (${upcomingNextMonth.length})`)}
+    ${bulletList(upcomingNextMonth.map(stayLine))}
 
     <p style="text-align:center;margin:24px 0 0;">
       ${ctaButton(dashboardUrl, 'Open full dashboard')}
