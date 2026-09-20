@@ -6,6 +6,9 @@ import { requireAdmin, requireSuperAdmin } from '../middleware/adminAuth.js'
 import { adminLimiter } from '../middleware/rateLimiters.js'
 import { buildSummaryReport } from '../lib/reports.js'
 import { getLocationTree, getFilterLabel, parseLocationFilter } from '../lib/hierarchy.js'
+import { sendDailyDigest, sendWeeklyDigest, sendMonthlyReport } from '../lib/scheduledReports.js'
+
+const DIGEST_SENDERS = { daily: sendDailyDigest, weekly: sendWeeklyDigest, monthly: sendMonthlyReport }
 
 const router = Router()
 
@@ -116,6 +119,24 @@ router.get('/reports/summary', requireSuperAdmin, async (req, res, next) => {
 router.get('/locations', async (req, res, next) => {
   try {
     res.json(await getLocationTree())
+  } catch (err) {
+    next(err)
+  }
+})
+
+// Manually fires one of the three scheduled digest emails on demand — same
+// underlying send functions the nightly cron calls, just triggered by a
+// super admin instead of the clock. Useful for testing a config/recipient
+// change immediately instead of waiting for the next scheduled run, and
+// must be triggered from wherever this server is actually deployed — the
+// Brevo account only accepts sends from an authorized IP, so this can't be
+// exercised from an arbitrary machine, only from the running service.
+router.post('/digests/:type/send', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const sendFn = DIGEST_SENDERS[req.params.type]
+    if (!sendFn) return res.status(400).json({ error: `Unknown digest type "${req.params.type}".` })
+    await sendFn()
+    res.json({ sent: true })
   } catch (err) {
     next(err)
   }

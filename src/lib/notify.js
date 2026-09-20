@@ -13,9 +13,10 @@ function envRecipients() {
 // falling back to the NOTIFY_EMAILS env var only when that setting is
 // empty/unset — previously this always read the env var and ignored the
 // setting entirely, so editing it in the UI had no effect on real
-// delivery. Used for booking/contact-form alerts; scheduledReports.js's
-// three digests each have their own dedicated setting (see
-// getDigestRecipients below), falling back to this same list in turn.
+// delivery. Used for booking/contact-form alerts, and always merged into
+// each digest's own recipient list below (never just a fallback for the
+// digests — the default list gets every digest too, on top of whichever
+// dedicated addresses are also configured).
 async function getAdminRecipients() {
   const stored = await getSetting('notify_emails')
   const emails = Array.isArray(stored) && stored.length > 0 ? stored : envRecipients()
@@ -23,10 +24,15 @@ async function getAdminRecipients() {
 }
 
 // key: 'daily_digest_emails' | 'weekly_digest_emails' | 'monthly_digest_emails'
+// Always sends to BOTH this digest's own list AND the default notify_emails
+// list, deduplicated — not a fallback (the default list gets the digest
+// regardless of whether a dedicated list is also set), per the operator's
+// explicit instruction that the default recipients must always be included.
 export async function getDigestRecipients(key) {
-  const stored = await getSetting(key)
-  if (Array.isArray(stored) && stored.length > 0) return stored.map((email) => ({ email }))
-  return getAdminRecipients()
+  const [stored, defaults] = await Promise.all([getSetting(key), getAdminRecipients()])
+  const dedicated = Array.isArray(stored) ? stored : []
+  const emails = [...new Set([...dedicated, ...defaults.map((r) => r.email)])]
+  return emails.map((email) => ({ email }))
 }
 
 // Fire-and-forget from the caller's point of view: a failed send should

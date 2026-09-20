@@ -15,10 +15,10 @@ export const SETTING_DEFAULTS = {
   // still override it per booking, and it's never recomputed on edit, same
   // as the discount field itself.
   default_discount_per_night: 0,
-  // Per-digest recipient lists (2026-09-20) — each empty by default, in
-  // which case scheduledReports.js falls back to notify_emails so delivery
-  // doesn't silently stop on a fresh deploy before a super admin has set
-  // these explicitly.
+  // Per-digest recipient lists (2026-09-20) — additive, not a fallback:
+  // notify_emails always gets every digest too (per the operator's
+  // explicit instruction), these are extra addresses on top of that, empty
+  // by default until a super admin adds any.
   daily_digest_emails: [],
   weekly_digest_emails: [],
   monthly_digest_emails: [],
