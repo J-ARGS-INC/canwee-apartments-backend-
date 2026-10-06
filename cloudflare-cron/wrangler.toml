@@ -1,0 +1,16 @@
+name = "canwee-cron"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# Cron expressions run in UTC. Lagos is UTC+1, so:
+#   0 11 * * *   = daily digest, noon Lagos
+#   0 21 * * *   = daily digest, 10pm Lagos
+#   0 21 * * 6   = weekly digest, Saturday 10pm Lagos
+#   0 7 1 * *    = monthly report, 1st of month 8am Lagos
+#   5 23 * * *   = auto check-in/out, 00:05 Lagos
+[triggers]
+crons = ["0 11 * * *", "0 21 * * *", "0 21 * * 6", "0 7 1 * *", "5 23 * * *"]
+
+[vars]
+# Confirm this matches your Render service URL.
+API_URL = "https://canwee-apartments-api.onrender.com"

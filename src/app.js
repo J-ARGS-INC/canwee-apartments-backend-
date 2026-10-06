@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import listingsRouter from './routes/listings.js'
+import cronJobsRouter from './routes/cronJobs.js'
 import bookingsRouter from './routes/bookings.js'
 import contactRouter from './routes/contact.js'
 import contentRouter from './routes/content.js'
@@ -45,6 +46,7 @@ export function createApp() {
   app.get('/api/health', (req, res) => res.json({ ok: true }))
 
   app.use('/api/listings', listingsRouter)
+  app.use('/api/cron', cronJobsRouter)
   app.use('/api/bookings', bookingsRouter)
   app.use('/api/contact', contactRouter)
   app.use('/api', contentRouter)

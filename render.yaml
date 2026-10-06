@@ -25,6 +25,8 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
+      - key: CRON_SECRET
+        sync: false
       - key: BREVO_API_KEY
         sync: false
       - key: BREVO_FROM_EMAIL
