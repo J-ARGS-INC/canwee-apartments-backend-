@@ -8,6 +8,9 @@ import { isValidDate, maxLength } from '../lib/validate.js'
 import { logAudit } from '../lib/auditLog.js'
 import { derivePaymentStatus } from '../lib/paymentStatus.js'
 import { hierarchyFilterCondition, parseLocationFilter } from '../lib/hierarchy.js'
+import { sendNotificationEmail, ADMIN_DASHBOARD_URL } from '../lib/notify.js'
+import { paymentLoggedEmail } from '../lib/emailTemplates.js'
+import { getBookingDisplayInfo } from '../lib/bookingDisplay.js'
 
 const router = Router()
 
@@ -214,6 +217,25 @@ router.post('/bookings/:id/payments', idempotent(), uploadReceipts, async (req, 
       action: 'payment_added',
       changes: { amount: amountNum, paymentMethod: paymentMethod || null, newAmountPaid, paymentStatus, receiptCount: files.length },
       actor: req.adminId,
+    })
+
+    getBookingDisplayInfo(id).then((ctx) => {
+      if (!ctx) return
+      sendNotificationEmail({
+        subject: `Payment logged: ₦${amountNum.toLocaleString('en-US')} — ${ctx.booking_code}`,
+        html: paymentLoggedEmail({
+          bookingCode: ctx.booking_code,
+          fullName: ctx.full_name,
+          amount: amountNum,
+          paymentMethod: paymentMethod || null,
+          newAmountPaid,
+          balance: updated[0].balance,
+          paymentStatus,
+          loggedBy: req.adminDisplayName,
+          receiptCount: files.length,
+          dashboardUrl: ADMIN_DASHBOARD_URL,
+        }),
+      })
     })
 
     res.status(201).json({ payment: inserted[0], booking: updated[0] })

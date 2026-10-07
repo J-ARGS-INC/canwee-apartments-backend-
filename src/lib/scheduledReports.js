@@ -1,9 +1,7 @@
 import { pool } from '../db.js'
 import { buildSummaryReport } from './reports.js'
-import { sendEmailTo, getDigestRecipients } from './notify.js'
+import { sendEmailTo, getDigestRecipients, ADMIN_DASHBOARD_URL } from './notify.js'
 import { dailyDigestEmail, weeklyDigestEmail, monthlyReportEmail } from './emailTemplates.js'
-
-const ADMIN_DASHBOARD_URL = process.env.ADMIN_DASHBOARD_URL || process.env.FRONTEND_URL || 'https://canweeapartments.com'
 
 function toDateKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`

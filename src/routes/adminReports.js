@@ -7,6 +7,7 @@ import { adminLimiter } from '../middleware/rateLimiters.js'
 import { buildSummaryReport } from '../lib/reports.js'
 import { getLocationTree, getFilterLabel, parseLocationFilter } from '../lib/hierarchy.js'
 import { sendDailyDigest, sendWeeklyDigest, sendMonthlyReport } from '../lib/scheduledReports.js'
+import { getBookingDisplayInfoBatch } from '../lib/bookingDisplay.js'
 
 const DIGEST_SENDERS = { daily: sendDailyDigest, weekly: sendWeeklyDigest, monthly: sendMonthlyReport }
 
@@ -33,17 +34,11 @@ async function enrichAuditRows(rows) {
   const adminUserIds = [...new Set(rows.filter((r) => r.entity_type === 'admin_user').map((r) => r.entity_id))]
   const paymentIds = [...new Set(rows.filter((r) => r.entity_type === 'payment').map((r) => r.entity_id))]
 
-  const [actorRows, bookingRows, expenseRows, adminUserRows, paymentRows] = await Promise.all([
+  const [actorRows, bookingById, expenseRows, adminUserRows, paymentRows] = await Promise.all([
     actorIds.length
       ? pool.query('select id, display_name from admin_users where id = any($1)', [actorIds])
       : { rows: [] },
-    bookingIds.length
-      ? pool.query(
-          `select b.id, b.booking_code, b.full_name, l.title as listing_title, l.unit_code
-           from bookings b join listings l on l.id = b.listing_id where b.id = any($1)`,
-          [bookingIds],
-        )
-      : { rows: [] },
+    getBookingDisplayInfoBatch(bookingIds),
     expenseIds.length
       ? pool.query(
           `select e.id, e.expense_code, e.category, l.title as listing_title, l.unit_code
@@ -64,7 +59,6 @@ async function enrichAuditRows(rows) {
   ])
 
   const actorNameById = new Map(actorRows.rows.map((r) => [r.id, r.display_name]))
-  const bookingById = new Map(bookingRows.rows.map((r) => [r.id, r]))
   const expenseById = new Map(expenseRows.rows.map((r) => [r.id, r]))
   const adminUserById = new Map(adminUserRows.rows.map((r) => [r.id, r]))
   const paymentById = new Map(paymentRows.rows.map((r) => [r.id, r]))

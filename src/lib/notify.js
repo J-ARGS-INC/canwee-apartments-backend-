@@ -2,6 +2,10 @@ import { getSetting } from './settings.js'
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
 
+// Shared "open admin dashboard" link for every outbound email — scheduled
+// digests and the live per-action notifications alike.
+export const ADMIN_DASHBOARD_URL = process.env.ADMIN_DASHBOARD_URL || process.env.FRONTEND_URL || 'https://canweeapartments.com'
+
 function envRecipients() {
   return (process.env.NOTIFY_EMAILS || '')
     .split(',')
@@ -9,17 +13,22 @@ function envRecipients() {
     .filter(Boolean)
 }
 
-// Reads from the DB setting a super admin can actually edit (SettingsTab),
-// falling back to the NOTIFY_EMAILS env var only when that setting is
-// empty/unset — previously this always read the env var and ignored the
-// setting entirely, so editing it in the UI had no effect on real
-// delivery. Used for booking/contact-form alerts, and always merged into
-// each digest's own recipient list below (never just a fallback for the
-// digests — the default list gets every digest too, on top of whichever
-// dedicated addresses are also configured).
+// Always included on every outbound notification, regardless of what a
+// super admin has since changed in Settings — the operator's explicit
+// request for a guaranteed-delivery baseline (2026-10-07, after the
+// notify_emails setting lost an address and a digest only reached one
+// person as a result).
+const ALWAYS_NOTIFY = ['echteedee2@gmail.com', 'emoawosejoshua@gmail.com']
+
+// Union of three sources, not a fallback chain: the hardcoded baseline
+// above, NOTIFY_EMAILS (support@/jargsltd@ — previously only used when the
+// DB setting was empty, now always included), and whatever a super admin
+// has added via Settings. Editing the setting only ever adds recipients
+// here, never removes the guaranteed ones.
 async function getAdminRecipients() {
   const stored = await getSetting('notify_emails')
-  const emails = Array.isArray(stored) && stored.length > 0 ? stored : envRecipients()
+  const fromSettings = Array.isArray(stored) ? stored : []
+  const emails = [...new Set([...ALWAYS_NOTIFY, ...envRecipients(), ...fromSettings])]
   return emails.map((email) => ({ email }))
 }
 

@@ -7,6 +7,9 @@ import { adminLimiter, loginLimiter } from '../middleware/rateLimiters.js'
 import { isValidDate, isValidEmail, maxLength, requireString } from '../lib/validate.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
 import { derivePaymentStatus } from '../lib/paymentStatus.js'
+import { sendNotificationEmail, ADMIN_DASHBOARD_URL } from '../lib/notify.js'
+import { adminLoginEmail, bookingCreatedEmail, bookingStatusChangedEmail } from '../lib/emailTemplates.js'
+import { getBookingDisplayInfo } from '../lib/bookingDisplay.js'
 
 // Precomputed so a login attempt for a username that doesn't exist still
 // spends real time in bcrypt.compare — otherwise "unknown username" would
@@ -120,6 +123,19 @@ router.post('/login', loginLimiter, async (req, res, next) => {
     }
 
     const token = jwt.sign({ sub: record.id }, process.env.JWT_SECRET, { expiresIn: '12h', algorithm: 'HS256' })
+
+    // Fire-and-forget: the server is already awake handling this request,
+    // so this needs no scheduler of its own — same reasoning as the other
+    // live, per-action notifications below.
+    sendNotificationEmail({
+      subject: `Admin login: ${record.display_name}`,
+      html: adminLoginEmail({
+        displayName: record.display_name,
+        role: record.role,
+        time: new Date().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' }),
+      }),
+    })
+
     res.json({ token, adminId: record.id, displayName: record.display_name, role: record.role })
   } catch (err) {
     next(err)
@@ -248,7 +264,7 @@ router.post('/bookings', async (req, res, next) => {
       return res.status(400).json({ error: 'Validation failed', fields: errors })
     }
 
-    const { rows: listingRows } = await pool.query('select price_per_night from listings where id = $1', [listingId])
+    const { rows: listingRows } = await pool.query('select price_per_night, title, unit_code from listings where id = $1', [listingId])
     if (listingRows.length === 0) {
       return res.status(404).json({ error: 'Listing not found' })
     }
@@ -311,6 +327,23 @@ router.post('/bookings', async (req, res, next) => {
       action: 'create',
       changes: { listingId, fullName, checkIn, checkOut, rate, discount: discountAmount, total, status: status || 'pending', agentId: agentId || null },
       actor: req.adminId,
+    })
+
+    sendNotificationEmail({
+      subject: `New booking: ${rows[0].booking_code} — ${fullName}`,
+      html: bookingCreatedEmail({
+        bookingCode: rows[0].booking_code,
+        fullName,
+        listingTitle: listingRows[0].title,
+        unitCode: listingRows[0].unit_code,
+        checkIn,
+        checkOut,
+        ratePerNight: rate,
+        discount: discountAmount,
+        total,
+        createdBy: req.adminDisplayName,
+        dashboardUrl: ADMIN_DASHBOARD_URL,
+      }),
     })
 
     res.status(201).json(rows[0])
@@ -572,7 +605,7 @@ router.patch('/bookings/:id', async (req, res, next) => {
             reason: owesMoney || recordCancelReason ? reason.trim() : undefined,
           })
 
-          result = { status: 200, body: updated[0] }
+          result = { status: 200, body: updated[0], notify: { previousStatus, newStatus: transition.to, reason: hasReason ? reason.trim() : null } }
         }
       }
     } catch (err) {
@@ -580,6 +613,29 @@ router.patch('/bookings/:id', async (req, res, next) => {
       throw err
     } finally {
       client.release()
+    }
+
+    if (result.notify) {
+      // Outside the transaction (read-only, purely for the email's
+      // display context) — join info the RETURNING clause above doesn't
+      // carry, since it only selects from bookings, not the joined listing.
+      const ctx = await getBookingDisplayInfo(id)
+      if (ctx) {
+        sendNotificationEmail({
+          subject: `Booking ${ctx.booking_code}: ${result.notify.newStatus.replace('_', ' ')}`,
+          html: bookingStatusChangedEmail({
+            bookingCode: ctx.booking_code,
+            fullName: ctx.full_name,
+            listingTitle: ctx.listing_title,
+            unitCode: ctx.unit_code,
+            oldStatus: result.notify.previousStatus,
+            newStatus: result.notify.newStatus,
+            changedBy: req.adminDisplayName,
+            reason: result.notify.reason,
+            dashboardUrl: ADMIN_DASHBOARD_URL,
+          }),
+        })
+      }
     }
 
     res.status(result.status).json(result.body)

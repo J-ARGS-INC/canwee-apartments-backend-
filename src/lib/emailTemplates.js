@@ -367,3 +367,119 @@ export function contactAdminNotificationEmail({ name, email, topic, message, rec
     </table>
   `)
 }
+
+const STATUS_LABEL = {
+  pending: 'Pending',
+  confirmed: 'Confirmed',
+  checked_in: 'Checked in',
+  checked_out: 'Checked out',
+  cancelled: 'Cancelled',
+  no_show: 'No show',
+}
+
+// Live, per-action notifications (not scheduled digests) — fired the
+// moment the matching admin.js/adminExpenses.js/adminPayments.js route
+// runs, from the request itself, so there's no cron/scheduler reliability
+// question for these at all: the server is already awake handling the
+// request that triggers them.
+
+export function adminLoginEmail({ displayName, role, time }) {
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Admin login</p>
+    ${summaryTable([
+      ['Account', escapeHtml(displayName)],
+      ['Role', role === 'super_admin' ? 'Super admin' : 'Admin'],
+      ['Time', escapeHtml(time)],
+    ])}
+  `)
+}
+
+export function bookingCreatedEmail({ bookingCode, fullName, listingTitle, unitCode, checkIn, checkOut, ratePerNight, discount, total, createdBy, dashboardUrl }) {
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">New booking added</p>
+    <p style="margin:0 0 20px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(listingTitle)}${unitCode ? ` (${escapeHtml(unitCode)})` : ''}</p>
+    ${summaryTable([
+      ['Booking code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(bookingCode)}</span>`],
+      ['Guest', escapeHtml(fullName)],
+      ['Check-in', escapeHtml(checkIn)],
+      ['Check-out', escapeHtml(checkOut)],
+      ['Rate / night', money(ratePerNight)],
+      ['Discount', money(discount)],
+      ['Total', money(total)],
+      ['Added by', escapeHtml(createdBy)],
+    ])}
+    <p style="text-align:center;margin:0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}
+
+export function bookingStatusChangedEmail({ bookingCode, fullName, listingTitle, unitCode, oldStatus, newStatus, changedBy, reason, dashboardUrl }) {
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Booking status changed</p>
+    <p style="margin:0 0 20px;font-size:18px;font-weight:700;color:${COLORS.ink};">${escapeHtml(listingTitle)}${unitCode ? ` (${escapeHtml(unitCode)})` : ''}</p>
+    ${summaryTable([
+      ['Booking code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(bookingCode)}</span>`],
+      ['Guest', escapeHtml(fullName)],
+      ['Status', `${escapeHtml(STATUS_LABEL[oldStatus] || oldStatus)} &rarr; ${escapeHtml(STATUS_LABEL[newStatus] || newStatus)}`],
+      ['Changed by', escapeHtml(changedBy)],
+      ...(reason ? [['Reason', escapeHtml(reason)]] : []),
+    ])}
+    <p style="text-align:center;margin:0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}
+
+export function expenseAddedEmail({ expenseCode, category, amount, scopeLabel, loggedBy, description, dashboardUrl }) {
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Expense added</p>
+    <p style="margin:0 0 20px;font-size:18px;font-weight:700;color:${COLORS.ink};">${money(amount)} &middot; ${escapeHtml(category)}</p>
+    ${summaryTable([
+      ['Expense code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(expenseCode)}</span>`],
+      ['Location', escapeHtml(scopeLabel)],
+      ['Logged by', escapeHtml(loggedBy)],
+      ...(description ? [['Description', escapeHtml(description)]] : []),
+    ])}
+    <p style="text-align:center;margin:0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}
+
+export function paymentLoggedEmail({ bookingCode, fullName, amount, paymentMethod, newAmountPaid, balance, paymentStatus, loggedBy, receiptCount, dashboardUrl }) {
+  const money = (n) => `&#8358;${Math.round(n).toLocaleString('en-US')}`
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Payment logged</p>
+    <p style="margin:0 0 20px;font-size:18px;font-weight:700;color:${COLORS.ink};">${money(amount)} &middot; ${escapeHtml(fullName)}</p>
+    ${summaryTable([
+      ['Booking code', `<span style="font-family:monospace;font-size:13px;font-weight:700;">${escapeHtml(bookingCode)}</span>`],
+      ['Method', paymentMethod ? escapeHtml(paymentMethod) : 'Unspecified'],
+      ['New amount paid', money(newAmountPaid)],
+      ['Balance', money(balance)],
+      ['Payment status', escapeHtml(paymentStatus.replace('_', ' '))],
+      ['Receipt', `${receiptCount} file${receiptCount === 1 ? '' : 's'} attached`],
+      ['Logged by', escapeHtml(loggedBy)],
+    ])}
+    <p style="text-align:center;margin:0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}
+
+export function autoStatusSummaryEmail({ checkedIn, checkedOut, dashboardUrl }) {
+  const line = (b) => `<span style="font-family:monospace;">${escapeHtml(b.booking_code)}</span> &middot; ${escapeHtml(b.full_name)} &middot; ${escapeHtml(b.title)}${b.unit_code ? ` (${escapeHtml(b.unit_code)})` : ''}`
+  return shell(`
+    <p style="margin:0 0 4px;font-size:12px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:${COLORS.navy};">Automatic check-in/check-out</p>
+    <p style="margin:0 0 16px;font-size:13px;color:${COLORS.muted};">Run automatically overnight — no admin action taken.</p>
+    ${sectionHeading(`Checked in (${checkedIn.length})`)}
+    ${bulletList(checkedIn.map(line))}
+    ${sectionHeading(`Checked out (${checkedOut.length})`)}
+    ${bulletList(checkedOut.map(line))}
+    <p style="text-align:center;margin:24px 0 0;">
+      ${ctaButton(dashboardUrl, 'Open admin dashboard')}
+    </p>
+  `)
+}

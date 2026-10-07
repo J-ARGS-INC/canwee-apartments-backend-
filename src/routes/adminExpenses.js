@@ -5,7 +5,9 @@ import { adminLimiter } from '../middleware/rateLimiters.js'
 import { diffFields, logAudit } from '../lib/auditLog.js'
 import { maxLength, isValidDate } from '../lib/validate.js'
 import { idempotent } from '../middleware/idempotency.js'
-import { hierarchyFilterCondition, parseLocationFilter, resolveExpenseScope } from '../lib/hierarchy.js'
+import { hierarchyFilterCondition, parseLocationFilter, resolveExpenseScope, getFilterLabel } from '../lib/hierarchy.js'
+import { sendNotificationEmail, ADMIN_DASHBOARD_URL } from '../lib/notify.js'
+import { expenseAddedEmail } from '../lib/emailTemplates.js'
 
 const EXPENSE_FIELDS = {
   expenseDate: 'expense_date',
@@ -146,6 +148,26 @@ router.post('/', idempotent(), async (req, res, next) => {
       action: 'create',
       changes: { category, amount: amountNum, ...scope, paidTo },
       actor: req.adminId,
+    })
+
+    const scopeFilter = scope.listingId
+      ? { level: 'unit', id: scope.listingId }
+      : scope.areaId
+        ? { level: 'area', id: scope.areaId }
+        : { level: 'location', id: scope.locationId }
+    getFilterLabel(scopeFilter).then((scopeLabel) => {
+      sendNotificationEmail({
+        subject: `Expense added: ₦${amountNum.toLocaleString('en-US')} — ${category}`,
+        html: expenseAddedEmail({
+          expenseCode: rows[0].expense_code,
+          category,
+          amount: amountNum,
+          scopeLabel: scopeLabel || 'Unknown',
+          loggedBy: loggedBy || req.adminId,
+          description: description || null,
+          dashboardUrl: ADMIN_DASHBOARD_URL,
+        }),
+      })
     })
 
     res.status(201).json({ id: rows[0].id, expenseCode: rows[0].expense_code })

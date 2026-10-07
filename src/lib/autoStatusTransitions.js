@@ -1,5 +1,7 @@
 import { pool } from '../db.js'
 import { logAudit } from './auditLog.js'
+import { sendNotificationEmail, ADMIN_DASHBOARD_URL } from './notify.js'
+import { autoStatusSummaryEmail } from './emailTemplates.js'
 
 // Confirmed-only, per the operator's decision: a `pending` booking whose
 // check-in date has passed is never silently auto-progressed (it stays
@@ -15,10 +17,13 @@ export async function runAutoStatusTransitions() {
   // passed (e.g. the cron didn't run for a few days) catches up correctly
   // in one run instead of needing two separate days to progress through
   // both transitions.
+  // `update ... from listings` so the summary email below has the guest
+  // name/unit without a separate follow-up query per row.
   const { rows: checkedIn } = await pool.query(
-    `update bookings set status = 'checked_in', actual_check_in_at = now()
-     where status = 'confirmed' and check_in <= current_date
-     returning id`,
+    `update bookings b set status = 'checked_in', actual_check_in_at = now()
+     from listings l
+     where b.listing_id = l.id and b.status = 'confirmed' and b.check_in <= current_date
+     returning b.id, b.booking_code, b.full_name, l.title, l.unit_code`,
   )
   for (const row of checkedIn) {
     logAudit({
@@ -31,9 +36,10 @@ export async function runAutoStatusTransitions() {
   }
 
   const { rows: checkedOut } = await pool.query(
-    `update bookings set status = 'checked_out', actual_check_out_at = now()
-     where status = 'checked_in' and check_out <= current_date
-     returning id`,
+    `update bookings b set status = 'checked_out', actual_check_out_at = now()
+     from listings l
+     where b.listing_id = l.id and b.status = 'checked_in' and b.check_out <= current_date
+     returning b.id, b.booking_code, b.full_name, l.title, l.unit_code`,
   )
   for (const row of checkedOut) {
     logAudit({
@@ -42,6 +48,16 @@ export async function runAutoStatusTransitions() {
       action: 'status_change',
       changes: { status: { old: 'checked_in', new: 'checked_out' } },
       actor: 'system',
+    })
+  }
+
+  // One summary email for the whole run, not one per booking — a quiet
+  // night sends nothing at all, a busy one doesn't spam an inbox with
+  // several separate messages.
+  if (checkedIn.length > 0 || checkedOut.length > 0) {
+    sendNotificationEmail({
+      subject: `Automatic check-in/check-out: ${checkedIn.length} in, ${checkedOut.length} out`,
+      html: autoStatusSummaryEmail({ checkedIn, checkedOut, dashboardUrl: ADMIN_DASHBOARD_URL }),
     })
   }
 
